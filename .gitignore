@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+# Job artifacts. attempts.jsonl and verdicts.jsonl are the corpus -- keep them out
+# of git and collect them deliberately, or a laptop run rewrites the dataset.
+outputs/attempts.jsonl
+outputs/verdicts.jsonl
+outputs/jobs/
+runs/
+.claude
+
