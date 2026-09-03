@@ -1,0 +1,12 @@
+execution:
+  language:
+    name: python
+    version: "3.11"
+  dependencies: ["numpy==999.999.999"]
+  system_dependencies: []
+  entry_points:
+    - name: run
+      command: "python run.py"
+io:
+  inputs: {}
+  outputs: []

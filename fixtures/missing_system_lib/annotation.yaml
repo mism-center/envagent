@@ -1,0 +1,12 @@
+execution:
+  language:
+    name: python
+    version: "3.11"
+  dependencies: []
+  system_dependencies: []
+  entry_points:
+    - name: run
+      command: "python run.py"
+io:
+  inputs: {}
+  outputs: []

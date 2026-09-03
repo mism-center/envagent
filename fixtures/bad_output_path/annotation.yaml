@@ -1,0 +1,15 @@
+execution:
+  language:
+    name: python
+    version: "3.11"
+  dependencies: []
+  system_dependencies: []
+  entry_points:
+    - name: run
+      command: "python run.py"
+      # Declares that this entry writes files -- which is what makes writing them
+      # to /results instead of output_path a detectable MOUNT_CONTRACT_ERROR.
+      default_output_location: outputs
+io:
+  inputs: {}
+  outputs: []

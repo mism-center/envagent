@@ -1,0 +1,9 @@
+execution:
+  language:
+    name: python
+    version: "3.11"
+  dependencies: []
+  entry_points: []
+io:
+  inputs: {}
+  outputs: []

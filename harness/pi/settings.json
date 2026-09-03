@@ -1,0 +1,6 @@
+{
+  "skills": ["/opt/skills/envbuild"],
+  "extensions": [
+    "/opt/pi/extensions/event-log"
+  ]
+}

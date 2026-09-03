@@ -1,0 +1,7 @@
+# buildkitd needs to be told the local registry speaks plain HTTP; without this
+# both the image push and the registry cache export fail with a TLS error.
+debug = false
+
+[registry."registry:5000"]
+  http = true
+  insecure = true
