@@ -303,6 +303,35 @@ def _c_build_mode():
     assert (c.failure_class, c.action, c.arg) == ("BUILD_MODE_MISMATCH", "SWITCH_INSTALL_MODE", "installed")
 
 
+@check("classify: dotted submodule miss is a version break, not a missing pkg")
+def _c_dotted_submodule():
+    # "pint.quantity" missing means pint itself imported fine -- the installed
+    # version just lacks that internal module. Re-adding pint is a no-op and
+    # gets the repair loop stuck (this is exactly what happened on the
+    # vivarium-chemotaxis benchmark job).
+    c = classify.classify("ModuleNotFoundError: No module named 'pint.quantity'", rung="L1")
+    assert (c.failure_class, c.action, c.arg) == ("ABI_MISMATCH", "PIN_PKG", "pint")
+
+
+@check("ladder: vivarium-core's import probe name is vivarium, not vivarium_core")
+def _c_vivarium_probe():
+    # Real bench failure: dist.replace("-", "_") guessed "vivarium_core", so L1
+    # reported the installed distribution as a missing module forever.
+    import ladder
+    s = spec(pkg_specs=["vivarium-core==0.0.34"])
+    assert ladder.import_names(s) == ["vivarium"]
+
+
+@check("ladder: opencv-python and ipython probe as cv2 / IPython")
+def _c_probe_aliases():
+    # Real bench failures: dist.replace("-", "_") guessed "opencv_python" and
+    # "ipython" (lowercase), both wrong -- L1 reported installed, working
+    # distributions as permanently missing.
+    import ladder
+    assert ladder.import_names(spec(pkg_specs=["opencv-python==4.9.0"])) == ["cv2"]
+    assert ladder.import_names(spec(pkg_specs=["ipython"])) == ["IPython"]
+
+
 @check("classify: the rest of the table fires on representative stderr")
 def _c_table():
     cases = {

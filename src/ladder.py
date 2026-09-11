@@ -34,6 +34,16 @@ RUNGS = ("L0", "L1", "L2", "L3", "L4")
 _SKIP_DIST = {"pip", "setuptools", "wheel", "build", "hatchling", "poetry-core",
               "flit-core", "meson-python", "scikit-build-core", "twine", "tox"}
 _PYPI_MODULE = {v.lower(): k for k, v in MODULE_PYPI.items()}
+# Extra dist -> module aliases that a straight reversal of MODULE_PYPI can't
+# express: several real distributions share one import module (opencv-python
+# and opencv-python-headless both give "cv2"), or differ only in case
+# ("ipython" installs "IPython"). Each was a real false L1 "missing" report
+# against an installed, working distribution.
+_PYPI_MODULE.update({
+    "opencv-python": "cv2",
+    "opencv-contrib-python": "cv2",
+    "ipython": "IPython",
+})
 
 # Probe run through `python -c` with the payload in an env var: keeps the docker
 # argv free of quoting hazards from LLM-authored package names.
