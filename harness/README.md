@@ -35,9 +35,8 @@ artifacts read-only, envbuild's own scratch read-write) and the `envbuild`
 ServiceAccount. `../run.sh` renders `deploy/agent-job.yaml` and applies it:
 
 ```bash
-export ENVBUILD_MODELS_PVC=<the claim the model artifacts live on>
-../run.sh /models/mbmm mism:model/mbmm
-kubectl -n envbuild logs -f job/envbuild-<job>
+../run.sh mbmm/1.0 mism:model/mbmm      # <model_id>/<version> on irods-pvc
+kubectl -n default logs -f job/envbuild-<job>
 ```
 
 One-time cluster setup is in `deploy/envbuild.yaml` plus two Secrets — see the
@@ -57,7 +56,7 @@ build with a stream error that looks like a model fault.
 | `ANTHROPIC_API_KEY` | Pi default resolution | `anthropic/claude-opus-4-5` |
 
 `AI_PROVIDER` and `AI_MODEL` override both. Other passthroughs: `MODEL_REPO`
-(a path under `/models`), `ANNOTATION`, `MODEL_ID`, `PROMPT`, `MISM_GUID`,
+(`/models/<model_id>/<version>`), `ANNOTATION`, `MODEL_ID`, `PROMPT`, `MISM_GUID`,
 `MAX_ATTEMPTS`.
 
 stdout = full JSON event trace; `attempts.jsonl` and `verdicts.jsonl` land under

@@ -1,13 +1,21 @@
-# One-time cluster setup for envbuild. Apply into the namespace envbuild runs in:
+# One-time cluster setup for envbuild:
 #
 #     kubectl apply -f deploy/envbuild.yaml
 #
 # Then create the registry credential separately -- it is the one object with a
 # secret in it, so it does not belong in a tracked file:
 #
-#     kubectl -n envbuild create secret generic envbuild-registry-auth \
+#     kubectl -n default create secret generic envbuild-registry-auth \
 #         --from-file=.dockerconfigjson=$HOME/.docker/config.json \
 #         --type=kubernetes.io/dockerconfigjson
+#
+# NAMESPACE: `default`, because that is where `irods-pvc` lives and a PVC cannot
+# be mounted across namespaces. The cost is real and worth naming: `delete` on
+# pods in `default` is broader than envbuild needs, since anything else running
+# there is in reach. envbuild only ever deletes pods whose names it generated
+# (`envbuild-<job>-*`), so the capability is wider than the behaviour. If that
+# gap matters later, the fix is a dedicated namespace with its own PVC bound to
+# the same share -- not a change to this code.
 #
 # The point of this file is the Role. envbuild creates pods and reads their logs;
 # it does not exec into them. `pods/exec` together with `pods/create` is arbitrary
@@ -15,21 +23,16 @@
 # read it. The agent is LLM-driven, so that verb is exactly what it must not have.
 ---
 apiVersion: v1
-kind: Namespace
-metadata:
-  name: envbuild
----
-apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: envbuild
-  namespace: envbuild
+  namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: envbuild-runner
-  namespace: envbuild
+  namespace: default
 rules:
   # Build pods and verification pods, created and reaped per attempt.
   - apiGroups: [""]
@@ -55,11 +58,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: envbuild-runner
-  namespace: envbuild
+  namespace: default
 subjects:
   - kind: ServiceAccount
     name: envbuild
-    namespace: envbuild
+    namespace: default
 roleRef:
   kind: Role
   name: envbuild-runner
@@ -73,7 +76,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: envbuild-work
-  namespace: envbuild
+  namespace: default
 spec:
   accessModes: ["ReadWriteMany"]
   # azurefile-csi on AKS. Any RWX class works.
@@ -95,7 +98,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: envbuild-deny-all
-  namespace: envbuild
+  namespace: default
 spec:
   podSelector:
     matchLabels:

@@ -92,12 +92,11 @@ Everything runs as pods: the agent, the Kaniko build, and each verification rung
 
 ```bash
 kubectl apply -f deploy/envbuild.yaml
-kubectl -n envbuild create secret generic envbuild-registry-auth \
+kubectl -n default create secret generic envbuild-registry-auth \
     --from-file=.dockerconfigjson=$HOME/.docker/config.json \
     --type=kubernetes.io/dockerconfigjson
 
-export ENVBUILD_MODELS_PVC=<claim the model artifacts live on>
-./run.sh /models/mbmm mism:model/mbmm
+./run.sh mbmm/1.0 mism:model/mbmm      # <model_id>/<version> on irods-pvc
 ```
 
 Or drive the CLI directly from inside the agent pod:
@@ -117,7 +116,7 @@ Two claims carry everything, and the split is deliberate:
 
 | Claim | Mounted | Holds |
 |---|---|---|
-| model artifacts | **read-only**, everywhere | model source — nothing envbuild runs can modify it |
+| `irods-pvc` | **read-only**, everywhere | model source, laid out `<model_id>/<version>/` |
 | `envbuild-work` | read-write | rendered Dockerfiles, Kaniko's digest file, each job's `inputs/` and `outputs/` |
 
 Bytes move on those claims, never through the API. That is what removed the

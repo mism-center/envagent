@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Fire one envbuild run as a Kubernetes Job.
 #
-#   ./run.sh /models/mbmm mism:model/mbmm metadata-package
+#   ./run.sh mbmm/1.0 mism:model/mbmm metadata-package
+#
+# The first argument is the model's path ON THE ARTIFACTS CLAIM, which is laid
+# out <model_id>/<version>/<files>. It is mounted read-only at /models, so
+# `mbmm/1.0` becomes /models/mbmm/1.0 inside every pod.
 #
 # This is a TEST SCRIPT. It uses your own kubectl to create the Job -- the agent
 # never sees your credential; inside the cluster it authenticates as the
@@ -12,10 +16,10 @@
 # One-time cluster setup, before the first run:
 #
 #   kubectl apply -f deploy/envbuild.yaml
-#   kubectl -n envbuild create secret generic envbuild-registry-auth \
+#   kubectl -n default create secret generic envbuild-registry-auth \
 #       --from-file=.dockerconfigjson=$HOME/.docker/config.json \
 #       --type=kubernetes.io/dockerconfigjson
-#   kubectl -n envbuild create secret generic envbuild-llm \
+#   kubectl -n default create secret generic envbuild-llm \
 #       --from-literal=AZURE_OPENAI_API_KEY=... \
 #       --from-literal=AZURE_OPENAI_BASE_URL=...
 #
@@ -27,27 +31,28 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-NS="${ENVBUILD_NAMESPACE:-envbuild}"
-MODELS_PVC="${ENVBUILD_MODELS_PVC:-}"
+NS="${ENVBUILD_NAMESPACE:-default}"
+MODELS_PVC="${ENVBUILD_MODELS_PVC:-irods-pvc}"
+MODELS_MOUNT="${ENVBUILD_MODELS_MOUNT:-/models}"
 
-MODEL_REPO="${1:-}"
-if [ -z "$MODEL_REPO" ]; then
-  echo "usage: $0 <model-path-under-/models> [model-id] [annotation-subpath]" >&2
-  echo "   e.g. $0 /models/mbmm mism:model/mbmm metadata-package" >&2
+SUBPATH="${1:-}"
+if [ -z "$SUBPATH" ]; then
+  echo "usage: $0 <model_id>/<version> [model-id] [annotation-subpath]" >&2
+  echo "   e.g. $0 mbmm/1.0 mism:model/mbmm metadata-package" >&2
   exit 64
 fi
-if [ -z "$MODELS_PVC" ]; then
-  echo "$0: set ENVBUILD_MODELS_PVC to the claim the model artifacts live on." >&2
-  exit 78
-fi
+SUBPATH="${SUBPATH#/}"                       # accept a leading slash either way
+SUBPATH="${SUBPATH#"${MODELS_MOUNT#/}/"}"    # ...and a full /models/... path
+MODEL_REPO="$MODELS_MOUNT/$SUBPATH"
 
-MODEL_ID="${2:-local:$(basename "$MODEL_REPO")}"
+MODEL_ID="${2:-local:$(echo "$SUBPATH" | tr / :)}"
 ANNOTATION_SUB="${3:-metadata-package}"
 ANNOTATION="$MODEL_REPO/$ANNOTATION_SUB"
 
-# Job names are DNS labels: lowercase alphanumerics and dashes, <=63 chars.
-JOB="$(date +%Y%m%d-%H%M%S)-$(basename "$MODEL_REPO" | tr '[:upper:]_.' '[:lower:]--' \
-        | tr -cd 'a-z0-9-' | cut -c1-20)"
+# Job names are DNS labels: lowercase alphanumerics and dashes, <=63 chars. The
+# subpath carries slashes and dots, so flatten before trimming.
+JOB="$(date +%Y%m%d-%H%M%S)-$(echo "$SUBPATH" | tr '[:upper:]/_.' '[:lower:]---' \
+        | tr -cd 'a-z0-9-' | cut -c1-24)"
 
 for s in envbuild-registry-auth envbuild-llm; do
   kubectl -n "$NS" get secret "$s" >/dev/null 2>&1 || {
@@ -63,6 +68,8 @@ sed -e "s|__JOB__|$JOB|g" \
     -e "s|__MODELS_PVC__|$MODELS_PVC|g" \
     deploy/agent-job.yaml | kubectl -n "$NS" apply -f -
 
-echo "job: envbuild-$JOB"
-echo "logs: kubectl -n $NS logs -f job/envbuild-$JOB"
-echo "records land on the work claim under /work/records"
+echo "job:     envbuild-$JOB"
+echo "model:   $MODEL_REPO  (claim $MODELS_PVC, read-only)"
+echo "logs:    kubectl -n $NS logs -f job/envbuild-$JOB"
+echo "pods:    kubectl -n $NS get pods -l job-id=$JOB -w"
+echo "records: /work/records on the envbuild-work claim"

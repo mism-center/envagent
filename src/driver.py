@@ -80,7 +80,7 @@ def load_config(path: str | None) -> configparser.ConfigParser:
                     "api_server": "",
                     "work_pvc": "envbuild-work",
                     "work_mount": "/work",
-                    "models_pvc": "",
+                    "models_pvc": "irods-pvc",
                     "models_mount": "/models"},
         "verifier": {"memory": ""},
         "budgets": {"max_attempts": "5", "wall_clock_s": "1200",

@@ -105,7 +105,7 @@ def mk_verifier(job_id="job-abc", client=None, **kw):
     kw.setdefault("work_mount", "/work")
     kw.setdefault("models_pvc", "models")
     kw.setdefault("models_mount", "/models")
-    kw.setdefault("code_ref", "/models/mbmm")
+    kw.setdefault("code_ref", "/models/mbmm/1.0")
     return verifier.K8sVerifier(job_id, client or FakeClient(), **kw)
 
 
@@ -861,7 +861,7 @@ def _k8s_verify_manifest():
     tmp = Path(tempfile.mkdtemp())
     try:
         v = mk_verifier(work_mount=str(tmp))
-        pod = v._pod_manifest("p", "reg@sha256:x", "/models/mbmm", ["python", "run.py"],
+        pod = v._pod_manifest("p", "reg@sha256:x", "/models/mbmm/1.0", ["python", "run.py"],
                               MountContract(), 300, network=False, env={"A": "1"})
         spec_, meta = pod["spec"], pod["metadata"]
         # Model code must not be handed a cluster credential.
@@ -875,7 +875,9 @@ def _k8s_verify_manifest():
         # Source is mounted read-only: a model cannot rewrite the corpus.
         code = next(m for m in spec_["containers"][0]["volumeMounts"]
                     if m["mountPath"] == MountContract().code_path)
-        assert code["readOnly"] is True and code["subPath"] == "mbmm", code
+        # Artifacts are laid out <model_id>/<version>/, so the subPath is both
+        # segments -- mounting just "mbmm" would verify the wrong version.
+        assert code["readOnly"] is True and code["subPath"] == "mbmm/1.0", code
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -885,7 +887,7 @@ def _k8s_verify_network_and_l1():
     tmp = Path(tempfile.mkdtemp())
     try:
         v = mk_verifier(work_mount=str(tmp))
-        on = v._pod_manifest("p", "img", "/models/mbmm", ["true"], MountContract(),
+        on = v._pod_manifest("p", "img", "/models/mbmm/1.0", ["true"], MountContract(),
                              300, network=True, env=None)
         # A pod no policy selects gets traffic; that is what "network on" means.
         assert "envbuild.io/network" not in on["metadata"]["labels"]

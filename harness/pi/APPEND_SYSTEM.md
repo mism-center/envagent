@@ -30,8 +30,8 @@ read-only at `/models/`, and a run's outputs land in `/work/<job>/outputs`. If
 you find yourself wanting to run a command inside a running container, the answer
 is a rung, not a shell.
 
-**The job is defined by environment variables:** `MODEL_REPO` (a path under the
-read-only models mount), `ANNOTATION` (optional path to a `metadata-package/` dir
+**The job is defined by environment variables:** `MODEL_REPO`
+(`/models/<model_id>/<version>` on the read-only artifacts claim), `ANNOTATION` (optional path to a `metadata-package/` dir
 or a YAML), `MODEL_ID` (optional). Records are written under `ENVBUILD_OUTPUTS`
 on the work claim, which outlives the pod.
 
