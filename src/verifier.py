@@ -9,9 +9,10 @@ Two topology constraints drive the shape here:
   * dockerd resolves mount paths on the *host*, not inside the agent container,
     so code is staged into a daemon-managed **named volume** via a tar stream.
     No host paths anywhere -- and it is the same shape as the PVC used in-cluster.
-  * the image is pushed by buildkitd to `registry:5000` but pulled by the host
-    daemon from `localhost:5000`, so the caller rewrites the registry host.
-    Digest-addressed, so only the host part differs.
+  * the build pod pushes from inside the cluster and this daemon pulls from
+    outside it. When those two hostnames differ, the caller sets
+    `registry_pull` and the push-side host is rewritten. Digest-addressed, so
+    only the host part differs.
 """
 
 from __future__ import annotations
@@ -119,9 +120,9 @@ class LocalDockerVerifier:
     def image_size(self, ref: str) -> int | None:
         """Bytes, measured on the pulled image.
 
-        Not from `buildx imagetools inspect`: that talks HTTPS to the registry and
-        a plain-HTTP local registry makes it fail silently, leaving image_bytes
-        null in every record. The verifier pulls anyway, so measure it here.
+        Not from `buildx imagetools inspect`: that talks HTTPS to the registry
+        and a plain-HTTP one makes it fail silently, leaving image_bytes null in
+        every record. The verifier pulls anyway, so measure it here.
         """
         out = _docker(["image", "inspect", "--format", "{{.Size}}", ref], timeout=60)
         try:

@@ -42,8 +42,8 @@ surface for the infra team.
   "image_digest": null,
   "code_revision": "9c1f…",
   "outputs_written": [],
-  "cache_hits": 7,
-  "vertices_total": 9,
+  "cache_hits": 0,
+  "vertices_total": 0,
   "tokens": 0
 }
 ```
@@ -62,9 +62,11 @@ Notes on the load-bearing fields:
   renderer knows which Dockerfile line came from which EnvSpec field.
 - **`action_taken`** — backfilled by the `patch` that responds to this row, so
   the failure and its repair sit together. `null` means the job ended here.
-- **`cache_hits` / `vertices_total`** — a fully-cached solve can emit no vertices
-  at all, so `cache_hits` alone is ambiguous. Read them as a fraction: `0/0` is a
-  total cache hit, `0/9` is a total miss. `duration_s` corroborates.
+- **`cache_hits` / `vertices_total`** — both always `0`: Kaniko builds run with
+  `--cache=false` (Phase 0 buys correctness, not speed). The fields stay in the
+  row because a row missing them is not comparable with one that has them; when
+  a caching builder lands, read them as a fraction (`0/0` total hit, `0/9` total
+  miss) with `duration_s` corroborating.
 - **`tokens`** — always 0 from the driver: the agent process does the model work,
   not this CLI. Fill it from the harness if you want per-job token accounting.
 

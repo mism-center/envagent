@@ -13,22 +13,17 @@ RUN apt-get update \
 # PyYAML and a managed Python via PEP 723 inline deps. Static binary, pinned.
 COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /usr/local/bin/
 
-# docker CLI + buildx plugin. Used ONLY for verification runs and digest
-# resolution against the host daemon -- the agent never builds through the socket.
+# docker CLI + buildx plugin. Used ONLY for verification runs and base-image
+# digest resolution (`buildx imagetools inspect`) against the host daemon --
+# the agent never builds through the socket.
 COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/docker-buildx \
      /usr/local/libexec/docker/cli-plugins/docker-buildx
 
-# buildctl, from the SAME buildkit version the daemon runs. Both are pinned for
-# the same reason: attempt records are only comparable across runs if the build
-# agent does not change underneath the corpus. Keep in step with
-# config.ini [builder] buildkit_version and compose.yaml.
-COPY --from=moby/buildkit:v0.24.0 /usr/bin/buildctl /usr/local/bin/buildctl
-
-# kubectl. Only the "kaniko" builder backend uses it (K8sBuilder shells out to
-# it -- a Pod is the build connection, its logs are the progress stream), but
-# it is baked in unconditionally so one image serves both backends. Pinned for
-# the same reason buildctl is: the build agent must not change under the corpus.
+# kubectl: this is how the build happens. K8sBuilder shells out to it -- a
+# Kaniko Pod is the build connection, its logs are the progress stream. Pinned,
+# like everything else the loop shells out to: attempt records are only
+# comparable across runs if the build agent does not change under the corpus.
 ARG KUBECTL_VERSION=v1.33.1
 RUN curl -fsSL -o /usr/local/bin/kubectl \
       "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \

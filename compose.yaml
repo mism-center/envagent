@@ -1,56 +1,39 @@
-# envbuild local topology: agent + buildkitd + registry.
+# envbuild topology: the build runs IN a Kubernetes cluster (Kaniko),
+# verification runs HERE against the local docker socket.
 #
-# Everything the agent does goes through a network endpoint, never a host path.
+#   agent ──kubectl──▶ Kaniko Pod ──push──▶ registry (Docker Hub)
+#     │                                          │
+#     └─ /var/run/docker.sock ◀──────────────────┘  (host daemon pulls the
+#        (verification runs only)                    same digest back)
 #
-#   agent ──gRPC──▶ buildkitd ──push──▶ registry:5000
-#     │                                     │
-#     └─ /var/run/docker.sock               │ (host daemon pulls
-#        (verification runs only) ◀─────────┘  the same digest from
-#                                              localhost:5000)
+# A real registry, not a compose-local one: the build pod lives in the cluster
+# and cannot reach a service on this host's compose network. Both halves have to
+# meet somewhere, and Docker Hub is the somewhere.
 #
-# The registry exists because buildkitd's output does not land in dockerd's image
-# store, so verification cannot `docker run` it directly. It also gives a cache
-# backend that behaves like Docker Hub and no pull-rate exposure while
-# developing. Swapping in Hub later is a config change, not a code change.
-#
-#   docker compose up -d buildkitd registry
 #   docker compose run --rm -v /path/to/model:/workspace/repo agent
 #
 # PHASE 0 IS FOR TRUSTED REPOS ONLY. Verification containers run model code with
 # no meaningful sandbox. Do not point this at public submissions.
 
 services:
-  buildkitd:
-    # Pinned. See config.ini [builder] buildkit_version for why.
-    image: moby/buildkit:v0.24.0
-    container_name: envbuild-buildkitd
-    privileged: true
-    command: ["--addr", "tcp://0.0.0.0:1234", "--config", "/etc/buildkit/buildkitd.toml"]
-    volumes:
-      - ./harness/buildkitd.toml:/etc/buildkit/buildkitd.toml:ro
-      - buildkit-cache:/var/lib/buildkit
-    networks: [envbuild]
-
-  registry:
-    image: registry:2
-    container_name: envbuild-registry
-    # Published so the HOST daemon can pull from localhost:5000 -- Docker treats
-    # localhost registries as insecure by default, so no daemon reconfiguration.
-    ports: ["5000:5000"]
-    volumes:
-      - registry-data:/var/lib/registry
-    networks: [envbuild]
-
   agent:
     build:
       context: .
       dockerfile: harness/Dockerfile
     image: mismplatform/pi-envagent:develop
-    depends_on: [buildkitd, registry]
+    # Never silently substitute the published tag for the locally built one --
+    # a published image lagging this Dockerfile dies at the first build with
+    # the image looking right.
+    pull_policy: never
     environment:
-      ENVBUILD_BUILDKIT_HOST: tcp://buildkitd:1234
-      ENVBUILD_REGISTRY_PUSH: registry:5000
-      ENVBUILD_REGISTRY_PULL: localhost:5000
+      ENVBUILD_KANIKO_NAMESPACE: ${ENVBUILD_KANIKO_NAMESPACE:-default}
+      ENVBUILD_KANIKO_KUBECONFIG: /home/node/.kube/config
+      ENVBUILD_REGISTRY_PUSH: ${ENVBUILD_REGISTRY_PUSH:-docker.io/mismplatform}
+      # Empty -> pull the pushed ref as-is. Only set when the push and pull
+      # hostnames genuinely differ.
+      ENVBUILD_REGISTRY_PULL: ${ENVBUILD_REGISTRY_PULL:-}
+      ENVBUILD_REGISTRY_INSECURE: "false"
+      ENVBUILD_REGISTRY_FLAT: "true"
       ENVBUILD_OUTPUTS: /workspace/outputs
       MODEL_REPO: /workspace/repo
       MODEL_ID: ${MODEL_ID:-}
@@ -69,16 +52,13 @@ services:
       # Verification runs only -- the agent never builds through this socket.
       - /var/run/docker.sock:/var/run/docker.sock
       - ./outputs:/workspace/outputs
+      # Read-only. Kaniko itself reads its push creds from the in-cluster
+      # Secret (envbuild-registry-auth), not from this file -- this one is for
+      # the verification-side `docker pull` only.
+      - ${ENVBUILD_DOCKER_CONFIG:-../benchmark-envagent/.secrets/dockerhub-config.json}:/home/node/.docker/config.json:ro
+      - ${ENVBUILD_KUBECONFIG:-../../../kubeconfig/kubeconfig-az-mism-dev}:/home/node/.kube/config:ro
     # The socket is root-owned; join the group that owns it rather than running
     # the agent as root. REQUIRED, with no default on purpose: a wrong gid does
     # not fail until L1, i.e. after a full build has already been paid for.
     #   export DOCKER_GID=$(stat -c %g /var/run/docker.sock)
     group_add: ["${DOCKER_GID:?set DOCKER_GID=$(stat -c %g /var/run/docker.sock) so the agent can reach the docker socket}"]
-    networks: [envbuild]
-
-networks:
-  envbuild:
-
-volumes:
-  buildkit-cache:
-  registry-data:

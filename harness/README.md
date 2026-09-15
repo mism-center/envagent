@@ -8,8 +8,7 @@ Runs the `envbuild` skill as a one-shot, headless container using the
 
 | Path | Role |
 |---|---|
-| `Dockerfile` | node:24 + Pi + skill + `uv` + `docker`/`buildx` + `buildctl`. **Build from repo root.** |
-| `buildkitd.toml` | Tells buildkitd the local registry is plain HTTP. Without it push and cache export fail on TLS. |
+| `Dockerfile` | node:24 + Pi + skill + `uv` + `docker`/`buildx` + `kubectl`. **Build from repo root.** |
 | `pi/settings.json` | Registers the skill. No MCP, no extensions. |
 | `pi/APPEND_SYSTEM.md` | Skill dir, uv rules, endpoint env vars, the verdict obligation, the trusted-corpus constraint. |
 | `entrypoint.sh` | Launches the run; resumes with `--continue` if the stream drops. |
@@ -31,10 +30,10 @@ docker build -t envbuild-pi -f harness/Dockerfile .
 
 ## Run
 
-The agent needs the buildkitd and registry services, so use compose rather than
-a bare `docker run`:
+The agent needs a kubeconfig, a registry credential file and the docker socket
+wired up together, so use compose rather than a bare `docker run`.
 
-Easiest is the launcher at the repo root, which brings the stack up for you:
+Easiest is the launcher at the repo root:
 
 ```bash
 export AZURE_OPENAI_BASE_URL="https://<resource>.cognitiveservices.azure.com/openai/v1/"
@@ -46,7 +45,6 @@ Or by hand:
 
 ```bash
 export DOCKER_GID=$(getent group docker | cut -d: -f3)
-docker compose up -d buildkitd registry
 docker compose run --rm \
   -e MODEL_ID="mism:model/1a2b3c" \
   -e ANNOTATION=/workspace/repo/metadata-package \
@@ -74,12 +72,16 @@ looks like a model fault.
 stdout = full JSON event trace; `outputs/attempts.jsonl` and
 `outputs/verdicts.jsonl` land in the mounted `./outputs`.
 
-## Why the two registry hostnames
+## Why the registry is not local
 
-buildkitd pushes to `registry:5000` (compose network). The **host** daemon pulls
-the same digest from `localhost:5000` (published port). Docker trusts localhost
-registries without an `--insecure-registry` daemon flag, so this needs no host
-reconfiguration. Same image, same digest, different route.
+The build is a Kaniko Pod **inside a Kubernetes cluster**; verification is a
+`docker run` **on this host**. Nothing on the compose network is reachable from
+the cluster, so the two halves meet at a registry both can reach (Docker Hub by
+default, `ENVBUILD_REGISTRY_PUSH`). Kaniko authenticates to it from an
+in-cluster Secret; the host pulls the same digest with its own docker config.
+
+When push and pull hostnames genuinely differ, set `ENVBUILD_REGISTRY_PULL` and
+the verifier rewrites the host part of the ref. Same image, same digest.
 
 ## Egress
 

@@ -54,10 +54,9 @@ import ladder as ladder_mod                          # noqa: E402
 import normalize                                     # noqa: E402
 import patch as patch_mod                            # noqa: E402
 import record                                        # noqa: E402
-from builder import LocalBuildKitBuilder             # noqa: E402
+from builder import K8sBuilder                      # noqa: E402
 from errors import InfraError                        # noqa: E402
 from envspec import EnvSpec, MountContract, render   # noqa: E402
-from k8s_builder import K8sBuilder                    # noqa: E402
 from verifier import LocalDockerVerifier             # noqa: E402
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -69,18 +68,14 @@ def load_config(path: str | None) -> configparser.ConfigParser:
     that differ between the compose stack and the cluster."""
     cfg = configparser.ConfigParser()
     cfg.read_dict({
-        "builder": {"backend": "local",
-                    "buildkit_host": "tcp://buildkitd:1234",
-                    "buildkit_version": "v0.24.0",
-                    "registry_push": "registry:5000",
-                    "insecure_registry": "true",
-                    "flat_registry": "false",
-                    "prune_on_cleanup": "true"},
-        "kaniko": {"namespace": "default",
-                   "kaniko_image": "gcr.io/kaniko-project/executor:v1.23.2",
-                   "helper_image": "busybox:1.36",
-                   "docker_config_secret": "envbuild-registry-auth",
-                   "kubeconfig": ""},
+        "builder": {"registry_push": "docker.io/mismplatform",
+                    "insecure_registry": "false",
+                    "flat_registry": "true",
+                    "namespace": "default",
+                    "kaniko_image": "gcr.io/kaniko-project/executor:v1.23.2",
+                    "helper_image": "busybox:1.36",
+                    "docker_config_secret": "envbuild-registry-auth",
+                    "kubeconfig": ""},
         "verifier": {"registry_pull": "localhost:5000",
                      "helper_image": "busybox:1.36",
                      "memory": ""},
@@ -92,8 +87,6 @@ def load_config(path: str | None) -> configparser.ConfigParser:
     })
     cfg.read([str(SKILL_DIR / "config.ini")] + ([path] if path else []))
     for env, (sec, key) in {
-        "ENVBUILD_BUILDER_BACKEND": ("builder", "backend"),
-        "ENVBUILD_BUILDKIT_HOST": ("builder", "buildkit_host"),
         "ENVBUILD_REGISTRY_PUSH": ("builder", "registry_push"),
         # Deliberately membership, not truthiness: a real external registry
         # (Docker Hub) is one single, directly-pullable target, so the pull
@@ -102,8 +95,8 @@ def load_config(path: str | None) -> configparser.ConfigParser:
         "ENVBUILD_REGISTRY_PULL": ("verifier", "registry_pull"),
         "ENVBUILD_REGISTRY_INSECURE": ("builder", "insecure_registry"),
         "ENVBUILD_REGISTRY_FLAT": ("builder", "flat_registry"),
-        "ENVBUILD_KANIKO_NAMESPACE": ("kaniko", "namespace"),
-        "ENVBUILD_KANIKO_KUBECONFIG": ("kaniko", "kubeconfig"),
+        "ENVBUILD_KANIKO_NAMESPACE": ("builder", "namespace"),
+        "ENVBUILD_KANIKO_KUBECONFIG": ("builder", "kubeconfig"),
         "ENVBUILD_OUTPUTS": ("paths", "outputs"),
     }.items():
         if env in os.environ:
@@ -161,7 +154,7 @@ def preflight(cfg, state) -> dict:
     saying the model failed for reasons nobody can reconstruct.
     """
     checks = {}
-    checks["buildkitd"] = make_builder(cfg, state).check_builder()
+    checks["kaniko"] = make_builder(cfg, state).check_builder()
     checks["dockerd"] = make_verifier(cfg, state).check_daemon()
     return checks
 
@@ -188,49 +181,26 @@ def _die_infra(cfg, state, exc: Exception) -> None:
 
 
 def builder_id(cfg) -> str:
-    """What actually built the image, for the attempt record.
-
-    Every row used to be stamped with `[builder] buildkit_version` regardless of
-    backend, so a Kaniko build was recorded as `v0.24.0` -- a BuildKit version
-    that never touched it. The whole point of the corpus is that records are
-    comparable across runs; a field naming the wrong build agent makes two
-    incomparable passes look like one.
-    """
-    if cfg.get("builder", "backend") == "kaniko":
-        return "kaniko " + cfg.get("kaniko", "kaniko_image").rsplit(":", 1)[-1]
-    return cfg.get("builder", "buildkit_version")
+    """What actually built the image, for the attempt record. The pinned Kaniko
+    tag: two corpus passes built by different executor versions stay
+    distinguishable instead of silently merging into one."""
+    return "kaniko " + cfg.get("builder", "kaniko_image").rsplit(":", 1)[-1]
 
 
-def make_builder(cfg, state):
-    """Which `Builder` to construct. "kaniko" exists for clusters whose
-    admission policy blocks BuildKit outright (see k8s_builder.py's module
-    docstring) -- same protocol either way, so nothing downstream branches
-    on this."""
-    backend = cfg.get("builder", "backend")
-    if backend == "kaniko":
-        b = K8sBuilder(
-            job_id=state["job_id"],
-            namespace=cfg.get("kaniko", "namespace"),
-            registry=cfg.get("builder", "registry_push"),
-            kaniko_image=cfg.get("kaniko", "kaniko_image"),
-            helper_image=cfg.get("kaniko", "helper_image"),
-            docker_config_secret=cfg.get("kaniko", "docker_config_secret"),
-            insecure_registry=cfg.getboolean("builder", "insecure_registry"),
-            flat_registry=cfg.getboolean("builder", "flat_registry"),
-            kubeconfig=cfg.get("kaniko", "kubeconfig") or None,
-        )
-    elif backend == "local":
-        b = LocalBuildKitBuilder(
-            job_id=state["job_id"],
-            addr=cfg.get("builder", "buildkit_host"),
-            registry=cfg.get("builder", "registry_push"),
-            builder_version=builder_id(cfg),
-            insecure_registry=cfg.getboolean("builder", "insecure_registry"),
-            prune_on_cleanup=cfg.getboolean("builder", "prune_on_cleanup"),
-            flat_registry=cfg.getboolean("builder", "flat_registry"),
-        )
-    else:
-        raise InfraError(f"unknown builder backend {backend!r} (expected local|kaniko)")
+def make_builder(cfg, state) -> K8sBuilder:
+    """The one `Builder`. See builder.py's module docstring for why Kaniko and
+    not a build daemon."""
+    b = K8sBuilder(
+        job_id=state["job_id"],
+        namespace=cfg.get("builder", "namespace"),
+        registry=cfg.get("builder", "registry_push"),
+        kaniko_image=cfg.get("builder", "kaniko_image"),
+        helper_image=cfg.get("builder", "helper_image"),
+        docker_config_secret=cfg.get("builder", "docker_config_secret"),
+        insecure_registry=cfg.getboolean("builder", "insecure_registry"),
+        flat_registry=cfg.getboolean("builder", "flat_registry"),
+        kubeconfig=cfg.get("builder", "kubeconfig") or None,
+    )
     b.attempt = state["attempt"]          # keep image tags aligned with attempts
     return b
 
@@ -265,7 +235,7 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
     # waiting for the L2 failure + a repair attempt to rediscover the same fact
     # per repo.
     mount = MountContract()
-    local_dirs = sorted({d for d in (ev.get("local_module_paths") or {}).values()})
+    local_dirs = sorted(set((ev.get("local_module_paths") or {}).values()))
     if local_dirs:
         mount = MountContract(**{
             **mount.to_dict(),
@@ -361,7 +331,7 @@ def cmd_init(args, cfg) -> None:
         "annotation": ann,
         "entry": entry,
         "draft_spec": spec.to_dict(),
-        "warning": (None if (ann.get("entry_points") or []) else
+        "warning": (None if ann.get("entry_points") else
                     "No entry point: this job cannot pass L2. Supply --annotation "
                     "(a metadata-package/ dir or YAML), or expect ENTRYPOINT_UNKNOWN."),
         "next": ("Review the draft against specs/synthesis.md. Write the final spec "

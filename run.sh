@@ -12,8 +12,8 @@
 # delete the line.
 #
 # Unlike the biomodel-annotator runner this uses compose, not a bare `docker
-# run`: envbuild needs buildkitd and the local registry on the same network, and
-# a standalone container cannot reach them.
+# run`: the agent needs a kubeconfig, a registry credential file and the docker
+# socket wired up together, and compose is where that wiring lives.
 #
 # On the hardening flags in the pi-agent runner (--cap-drop=ALL etc.): they are
 # deliberately NOT copied here. This container mounts /var/run/docker.sock, which
@@ -59,14 +59,8 @@ if [ -z "$DOCKER_GID" ]; then
 fi
 
 mkdir -p outputs
-# Only the local backend needs them. Under kaniko the build runs in-cluster and
-# pushes to a real registry, so starting these leaves two idle containers in
-# `docker ps` that look like the thing doing the building.
-if [ "${ENVBUILD_BUILDER_BACKEND:-local}" = "local" ]; then
-  docker compose up -d buildkitd registry
-else
-  echo "$0: backend=${ENVBUILD_BUILDER_BACKEND} -- skipping local buildkitd/registry." >&2
-fi
+# No local build service to start: the build runs in-cluster (Kaniko) and pushes
+# to a real registry. The only local daemon involved is the one that verifies.
 docker compose run --rm \
   -v "$REPO_HOST:/workspace/repo:ro" \
   agent

@@ -16,7 +16,6 @@ can proceed while the compose stack is still being sorted.
 
 from __future__ import annotations
 
-import base64
 import json
 import re
 import sys
@@ -35,7 +34,8 @@ import normalize                                      # noqa: E402
 import patch                                          # noqa: E402
 import record                                         # noqa: E402
 import verifier                                      # noqa: E402
-from builder import LocalBuildKitBuilder, map_vertex_to_step, parse_rawjson  # noqa: E402
+import builder                                       # noqa: E402
+from builder import K8sBuilder, match_step            # noqa: E402
 from errors import InfraError                        # noqa: E402
 from envspec import EnvSpec, MountContract, render     # noqa: E402
 
@@ -147,7 +147,7 @@ def _render_r_base():
 def _render_r_destdir():
     text = render(spec(pkg_manager="renv", pkg_specs=["deSolve"])).text
     assert 'destdir="/root/.cache/R"' in text
-    assert "target=/root/.cache/R" in text
+    assert "mkdir -p /root/.cache/R" in text
 
 
 @check("envspec: a malformed agent-supplied base_digest is rejected, not built")
@@ -166,18 +166,22 @@ def _spec_digest_guard():
 
 @check("renderer: emits no BuildKit-only syntax Kaniko silently mis-executes")
 def _render_kaniko_portable():
-    # Both halves of the mbmm regression found on the AKS/Kaniko benchmark pass.
+    # Both halves of the mbmm regression found on the AKS/Kaniko benchmark pass,
+    # plus the two directives Kaniko reads as plain comments.
     # 1. Heredoc RUN: Kaniko runs the delimiter as the command and the step
     #    no-ops, so every pre/post_install repair silently did nothing.
     # 2. Cache-mount target: Kaniko ignores --mount and never creates the
     #    directory, so R's destdir= is handed a path that does not exist.
     text = render(spec(pkg_manager="renv", pkg_specs=["deSolve"],
+                       apt_packages=["libxml2-dev"],
                        pre_install=["mkdir -p /root/.cache/R"],
                        post_install=["echo done"])).text
     assert "<<'ENVBUILD'" not in text and "ENVBUILD" not in text, text
+    assert "--mount=" not in text, text          # BuildKit-only; Kaniko ignores it
+    assert "# syntax=" not in text, text         # selects a BuildKit frontend
     assert "RUN set -eux \\\n && mkdir -p /root/.cache/R" in text, text
-    # the cache target is created before anything is told to write into it
-    run = next(b for b in text.split("\nRUN ") if "target=/root/.cache/R" in b)
+    # the cache dir is created before anything is told to write into it
+    run = next(r for r in text.split("\nRUN ") if "destdir=" in r)
     assert run.index("mkdir -p /root/.cache/R") < run.index("destdir="), run
 
 
@@ -545,28 +549,17 @@ def _b_ci():
 
 
 # ---------------------------------------------------------------- builder / ladder
-@check("builder: vertex maps back to the EnvSpec field that produced it")
+@check("builder: a logged instruction maps back to the EnvSpec field that produced it")
 def _bd_map():
     steps = render(spec()).steps
-    apt = map_vertex_to_step("[2/6] RUN --mount=type=cache,target=/var/cache/apt,sharing=locked "
-                             "--mount=type=cache,target=/var/lib/apt/lists,sharing=locked "
-                             "rm -f /etc/apt/apt.conf.d/docker-clean && apt-get update", steps)
+    # Kaniko echoes the rendered instruction flattened onto one line.
+    apt = match_step("RUN apt-get update && apt-get install -y "
+                     "--no-install-recommends libxml2-dev", steps)
     assert (apt.kind, apt.field) == ("apt", "apt_packages")
-    pkg = map_vertex_to_step("[4/6] RUN --mount=type=cache,target=/root/.cache/pip "
-                             "pip install 'numpy<2'", steps)
+    pkg = match_step("RUN mkdir -p /root/.cache/pip && pip install 'numpy<2'", steps)
     assert (pkg.kind, pkg.field) == ("pkg", "pkg_specs")
-
-
-@check("builder: rawjson stream yields vertex errors and decoded logs")
-def _bd_rawjson():
-    line = json.dumps({"vertexes": [{"digest": "d1", "name": "[2/5] RUN apt-get",
-                                     "error": "exit code 100"}],
-                       "logs": [{"vertex": "d1",
-                                 "data": base64.b64encode(b"E: Unable to locate package foo").decode()}]})
-    vs, bad = parse_rawjson(line + "\nnot json\n")
-    assert not bad                        # non-JSON lines are skipped, not fatal
-    assert vs["d1"].error == "exit code 100"
-    assert "Unable to locate package" in "".join(vs["d1"].logs)
+    # Nothing close enough must not be forced onto some step anyway.
+    assert match_step("LABEL nothing=here", steps) is None
 
 
 @check("ladder: entry point derived from file, module and bare-script commands")
@@ -646,49 +639,32 @@ def _i_daemon():
         "ModuleNotFoundError: No module named 'deSolve'")
 
 
-@check("infra: buildkitd preflight raises InfraError with remediation")
+@check("infra: builder preflight raises InfraError instead of building blind")
 def _i_builder():
-    b = LocalBuildKitBuilder("t", "tcp://127.0.0.1:9", "reg", "v0.24.0")
+    # No kubectl, or a kubeconfig pointing at nothing -- either way the job must
+    # die here, before a ten-minute build finds out for us.
+    b = K8sBuilder("t", "default", "reg", kubeconfig="/nonexistent/kubeconfig")
     try:
         b.check_builder()
-        raise AssertionError("unreachable builder did not raise")
-    except InfraError as exc:
-        assert "compose.host.yaml" in str(exc)      # names the actual fix
+        raise AssertionError("unreachable cluster did not raise")
+    except InfraError:
+        pass
 
 
-@check("builder: nested registry (registry:2/GHCR/ECR) keeps job id in the path")
-def _b_nested_registry():
-    b = LocalBuildKitBuilder("job-abc", "tcp://x:1", "registry:5000", "v0.24.0")
-    b.attempt = 3
-    assert b._image_name() == "registry:5000/envbuild/job-abc:a3"
-    assert b._cache_ref(spec()) == "registry:5000/envbuild-cache/python-3.11-slim"
-
-
-@check("builder: flat registry (Docker Hub) folds job id into the tag")
-def _b_flat_registry():
-    b = LocalBuildKitBuilder("job-abc", "tcp://x:1", "docker.io/mismplatform",
-                             "v0.24.0", flat_registry=True)
-    b.attempt = 3
-    assert b._image_name() == "docker.io/mismplatform/envbuild:job-abc-a3"
-    assert b._cache_ref(spec()) == "docker.io/mismplatform/envbuild-cache:python-3.11-slim"
-
-
-@check("k8s_builder: naming matches LocalBuildKitBuilder's nested/flat shape")
+@check("builder: nested registry keeps the job id in the path, flat folds it into the tag")
 def _k8s_naming():
-    import k8s_builder
-    b = k8s_builder.K8sBuilder("job-abc", "default", "registry:5000")
+    b = K8sBuilder("job-abc", "default", "registry:5000")
     b.attempt = 3
     assert b._image_name() == "registry:5000/envbuild/job-abc:a3"
 
-    b2 = k8s_builder.K8sBuilder("job-abc", "default", "docker.io/mismplatform", flat_registry=True)
+    b2 = K8sBuilder("job-abc", "default", "docker.io/mismplatform", flat_registry=True)
     b2.attempt = 3
     assert b2._image_name() == "docker.io/mismplatform/envbuild:job-abc-a3"
 
 
-@check("k8s_builder: pod name is a valid, unique k8s object name")
+@check("builder: pod name is a valid, unique k8s object name")
 def _k8s_pod_name():
-    import k8s_builder
-    b = k8s_builder.K8sBuilder("job-2026-09-14-a10a", "default", "registry:5000")
+    b = K8sBuilder("job-2026-09-14-a10a", "default", "registry:5000")
     b.attempt = 2
     name = b._pod_name()
     assert len(name) <= 63, name
@@ -696,17 +672,15 @@ def _k8s_pod_name():
     assert name != b._pod_name()          # two calls, two different names
 
 
-@check("k8s_builder: a Kaniko log line maps back to the EnvSpec field")
+@check("builder: a Kaniko log line maps back to the EnvSpec field")
 def _k8s_step_match():
-    import k8s_builder
-    from envspec import render
     # Real captured Kaniko output shape (v1.23.2): ANSI-colored INFO line
     # echoing the rendered instruction verbatim, no "Step N/M" header.
     rendered = render(spec())
     pkg_step = rendered.steps[3]
     assert pkg_step.kind == "pkg", pkg_step
-    # Kaniko flattens a multi-line rendered instruction (RUN --mount=...\ ...)
-    # onto one INFO line, same as the real captured output did.
+    # Kaniko flattens a multi-line rendered instruction onto one INFO line,
+    # same as the real captured output did.
     flattened = " ".join(pkg_step.instruction.splitlines())
     logs = "\n".join([
         "\x1b[36mINFO\x1b[0m[0001] Retrieving image manifest python:3.11-slim",
@@ -714,7 +688,7 @@ def _k8s_step_match():
         "ERROR: Could not find a version that satisfies the requirement",
         "error building image: error building stage: failed to execute command",
     ])
-    step = k8s_builder._match_kaniko_step(logs, rendered.steps)
+    step = builder.match_kaniko_step(logs, rendered.steps)
     assert step is not None and step.index == pkg_step.index, step
 
 

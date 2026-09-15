@@ -31,8 +31,9 @@ uv run src/driver.py --help
 uv run src/driver.py render --spec spec.json
 ```
 
-Anything past `init` needs the compose stack (`docker compose up -d buildkitd
-registry`) and `buildctl` on `PATH`.
+Anything past `init` needs `kubectl` on `PATH` with a context that can create
+pods, a registry the cluster can push to, and a local docker daemon to verify
+against.
 
 ## Invariants to preserve when editing
 
@@ -68,10 +69,15 @@ When you change one of these, check the others:
 | a typed action | `src/patch.py` `ACTIONS`, `specs/remediation_actions.md`, the coverage test |
 | an attempt/verdict field | `src/record.py` required lists, `specs/record_schema.md` |
 | the renderer's layer order | `scripts/test_envbuild.py` `renderer: fixed layer order` |
-| the buildkit version | `config.ini`, `compose.yaml`, `harness/Dockerfile` — all three |
+| the Kaniko or kubectl version | `config.ini` `kaniko_image`, `harness/Dockerfile` `KUBECTL_VERSION` |
 
-Bumping buildkit is a deliberate act: it introduces a discontinuity in error
+Bumping the builder is a deliberate act: it introduces a discontinuity in error
 signatures across the corpus. Do it between corpus runs, not during one.
+
+**The builder is Kaniko, and only Kaniko.** There is no BuildKit path and no
+backend switch. `--mount=type=cache`, heredoc `RUN` and `# syntax=` directives
+are BuildKit-only and Kaniko mis-executes or ignores all three, so the renderer
+must never emit them — `scripts/test_envbuild.py` asserts that.
 
 ## Adding a classifier rule
 

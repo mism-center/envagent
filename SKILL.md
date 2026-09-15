@@ -1,6 +1,6 @@
 ---
 name: envbuild
-description: Turn a registered computational model (a git repo plus an approved annotation YAML) into a verified execution environment — a digest-pinned dependency image pushed to a registry, a verification level (L0–L3), and a complete record of every attempt made to get there. Runs a search-with-verification loop: synthesize a structured EnvSpec, build it with BuildKit, climb the verification ladder, classify the failure, apply exactly one typed repair, repeat until verified or out of budget. Use whenever a user asks to build, containerize, dockerize, reproduce, or verify the execution environment for a model or repo — including "make this repo runnable", "build an image for this model", "does this model actually run", "why won't this install", or "reverify this after the code changed". Trusted-corpus repos only.
+description: Turn a registered computational model (a git repo plus an approved annotation YAML) into a verified execution environment — a digest-pinned dependency image pushed to a registry, a verification level (L0–L3), and a complete record of every attempt made to get there. Runs a search-with-verification loop: synthesize a structured EnvSpec, build it with Kaniko, climb the verification ladder, classify the failure, apply exactly one typed repair, repeat until verified or out of budget. Use whenever a user asks to build, containerize, dockerize, reproduce, or verify the execution environment for a model or repo — including "make this repo runnable", "build an image for this model", "does this model actually run", "why won't this install", or "reverify this after the code changed". Trusted-corpus repos only.
 ---
 
 # envbuild
@@ -71,27 +71,25 @@ replays L2–L3 against the existing image and skips the expensive part entirely
 
 ### Step 0 — Preconditions
 
-Confirm the repo is corpus-trusted. Then check the stack is up:
+Confirm the repo is corpus-trusted. Then check the substrate:
 
 ```bash
-docker compose -f "$SKILL_DIR/compose.yaml" ps
+kubectl auth can-i create pods -n "${ENVBUILD_KANIKO_NAMESPACE:-default}"
+docker info >/dev/null          # verification only; the agent never builds through it
 ```
 
-`buildkitd` and `registry` must both be running, and `buildctl` must be on
-`PATH`. If you are driving from the **host** (a Claude Code session rather than
-the Pi container), both need one-time setup:
+Builds run as a Kaniko Pod in a Kubernetes cluster, so `kubectl` must be on
+`PATH` with a context that can create pods, and the push registry must be
+reachable **from the cluster** (`ENVBUILD_REGISTRY_PUSH`). Kaniko reads its push
+credentials from an in-cluster Secret, created once per cluster:
 
 ```bash
-docker run --rm --entrypoint cat moby/buildkit:v0.24.0 /usr/bin/buildctl > ~/.local/bin/buildctl
-chmod +x ~/.local/bin/buildctl
-docker compose -f "$SKILL_DIR/compose.yaml" -f "$SKILL_DIR/compose.host.yaml" \
-  up -d buildkitd registry
-export ENVBUILD_BUILDKIT_HOST=tcp://127.0.0.1:1234
+kubectl create secret generic envbuild-registry-auth \
+    --from-file=.dockerconfigjson=$HOME/.docker/config.json \
+    --type=kubernetes.io/dockerconfigjson
 ```
 
-The base compose file leaves buildkitd unpublished on purpose; `compose.host.yaml`
-binds it to loopback only. If any of this is missing, say so — do not try to build
-without it.
+If any of this is missing, say so — do not try to build without it.
 
 ### Step 1 — `init`
 
@@ -159,7 +157,7 @@ Every exit path writes a verdict. Do not end a job without one:
 envbuild verdict --job-id "$JOB" --status verified
 envbuild verdict --job-id "$JOB" --status failed   --reason "annotation declares no entry point"
 envbuild verdict --job-id "$JOB" --status escalated --reason "MATLAB toolchain"
-envbuild verdict --job-id "$JOB" --status error    --reason "buildkitd unreachable"
+envbuild verdict --job-id "$JOB" --status error    --reason "cluster unreachable"
 ```
 
 `verdict` also tears down: containers, named volumes, pulled images, build cache.

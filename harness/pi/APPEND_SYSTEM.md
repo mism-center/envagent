@@ -14,12 +14,12 @@ not point them at `/tmp` — `/tmp` may be mounted `noexec`, and the managed
 Python then fails to exec.
 
 **Endpoints come from the environment,** already set by compose:
-`ENVBUILD_BUILDKIT_HOST`, `ENVBUILD_REGISTRY_PUSH`, `ENVBUILD_REGISTRY_PULL`,
-`ENVBUILD_OUTPUTS`. Never hardcode them and never edit `config.ini` at runtime.
+`ENVBUILD_KANIKO_NAMESPACE`, `ENVBUILD_KANIKO_KUBECONFIG`,
+`ENVBUILD_REGISTRY_PUSH`, `ENVBUILD_REGISTRY_PULL`, `ENVBUILD_OUTPUTS`. Never hardcode them and never edit `config.ini` at runtime.
 
-**Tools available:** `buildctl` (talks to the buildkitd service over gRPC),
-`docker` and `docker buildx` (talk to the HOST daemon over the mounted socket,
-for verification runs and digest resolution only), `git`, `uv`, `rg`. There is no
+**Tools available:** `kubectl` (this is how builds happen — a Kaniko Pod per
+attempt), `docker` and `docker buildx` (talk to the HOST daemon over the mounted
+socket, for verification runs and digest resolution only), `git`, `uv`, `rg`. There is no
 MCP server in this harness — everything is a shell command.
 
 **The job is defined by environment variables:** `MODEL_REPO` (default
