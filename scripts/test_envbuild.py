@@ -16,8 +16,10 @@ can proceed while the compose stack is still being sorted.
 
 from __future__ import annotations
 
+import io
 import json
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -35,6 +37,8 @@ import patch                                          # noqa: E402
 import record                                         # noqa: E402
 import verifier                                      # noqa: E402
 import builder                                       # noqa: E402
+import k8s                                           # noqa: E402
+import registry                                      # noqa: E402
 from builder import K8sBuilder, match_step            # noqa: E402
 from errors import InfraError                        # noqa: E402
 from envspec import EnvSpec, MountContract, render     # noqa: E402
@@ -57,6 +61,52 @@ def spec(**kw) -> EnvSpec:
             "pkg_specs": ["numpy<2"], "apt_packages": ["libxml2-dev"]}
     base.update(kw)
     return EnvSpec(**base)
+
+
+class FakeClient:                              # pylint: disable=unused-argument
+    """A cluster that records what it was asked to create and answers canned.
+
+    The whole Kubernetes surface is five calls, so faking it is five methods --
+    which is itself the argument for the surface being that small.
+    """
+
+    def __init__(self, namespace="envbuild", allow=True, exit_code=0, logs=""):
+        self.namespace = namespace
+        self.allow = allow
+        self.exit_code = exit_code
+        self.logs = logs
+        self.created: list[dict] = []
+        self.deleted: list[str] = []
+
+    def can_i(self, verb, resource):
+        return self.allow
+
+    def create_pod(self, manifest):
+        self.created.append(manifest)
+        return manifest
+
+    def delete_pod(self, name, grace_seconds=0):
+        self.deleted.append(name)
+
+    def pod_log(self, name, container, tail_bytes=200_000):
+        return self.logs
+
+    def wait_terminated(self, name, container, deadline, poll_s=2.0):
+        return self.exit_code, ""
+
+
+def mk_builder(job_id="job-abc", registry_push="registry:5000", client=None, **kw):
+    return K8sBuilder(job_id, client or FakeClient(), registry_push,
+                      work_pvc="envbuild-work", work_mount="/work", **kw)
+
+
+def mk_verifier(job_id="job-abc", client=None, **kw):
+    kw.setdefault("work_pvc", "envbuild-work")
+    kw.setdefault("work_mount", "/work")
+    kw.setdefault("models_pvc", "models")
+    kw.setdefault("models_mount", "/models")
+    kw.setdefault("code_ref", "/models/mbmm")
+    return verifier.K8sVerifier(job_id, client or FakeClient(), **kw)
 
 
 # ---------------------------------------------------------------- renderer
@@ -519,16 +569,6 @@ def _e_annotation():
     assert ann["language"] == "python"
 
 
-@check("evidence: context tar respects its ceiling")
-def _e_tar():
-    assert len(evidence.make_tar(FIXTURES / "dep_conflict")) > 0
-    try:
-        evidence.make_tar(FIXTURES / "dep_conflict", max_bytes=10)
-        raise AssertionError("ceiling not enforced")
-    except ValueError:
-        pass
-
-
 @check("baseselect: the table picks the documented base per language")
 def _b_table():
     assert baseselect.select({"languages": {"python": 3}, "python": {}, "ci": [],
@@ -625,46 +665,107 @@ def _l_rungs():
 
 
 # ---------------------------------------------------------------- infra faults
-@check("infra: the daemon-unreachable message is recognised, not classified")
-def _i_daemon():
-    # The exact stderr that turned a successful L0 into an `UNKNOWN` corpus row.
-    real = ("permission denied while trying to connect to the Docker daemon socket "
-            "unix:///var/run/docker.sock")
-    assert verifier._DAEMON_UNREACHABLE.search(real)
-    for other in ("Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
-                  "Is the docker daemon running?"):
-        assert verifier._DAEMON_UNREACHABLE.search(other), other
-    # A genuine model failure must NOT be mistaken for an infra fault.
-    assert not verifier._DAEMON_UNREACHABLE.search(
-        "ModuleNotFoundError: No module named 'deSolve'")
+@check("infra: a k8s error surfaces its Status reason, not a raw body")
+def _i_status():
+    import urllib.error
+    body = json.dumps({"kind": "Status", "reason": "Forbidden",
+                       "message": 'pods is forbidden: User "sa" cannot create '
+                                  'resource "pods" in namespace "envbuild"'}).encode()
+    exc = urllib.error.HTTPError("u", 403, "Forbidden", {}, io.BytesIO(body))
+    msg = k8s.Client._status_message("POST", "/api/v1/pods", exc)
+    # The operator needs the missing rule named. "HTTP 403" alone does not.
+    assert "Forbidden" in msg and "cannot create" in msg, msg
 
 
 @check("infra: builder preflight raises InfraError instead of building blind")
 def _i_builder():
-    # No kubectl, or a kubeconfig pointing at nothing -- either way the job must
-    # die here, before a ten-minute build finds out for us.
-    b = K8sBuilder("t", "default", "reg", kubeconfig="/nonexistent/kubeconfig")
+    # The Role is missing the rule. Die here, not after a ten-minute build.
+    b = mk_builder(client=FakeClient(allow=False))
     try:
         b.check_builder()
-        raise AssertionError("unreachable cluster did not raise")
-    except InfraError:
-        pass
+        raise AssertionError("a refused access review did not raise")
+    except InfraError as exc:
+        assert "rbac" in str(exc).lower(), exc      # names the actual fix
+
+
+@check("infra: no cluster credential at all is an InfraError naming every option")
+def _i_no_cred():
+    saved = k8s._SA_DIR
+    k8s._SA_DIR = Path("/nonexistent/serviceaccount")
+    try:
+        k8s.Client.resolve(namespace="envbuild")
+        raise AssertionError("missing credential did not raise")
+    except InfraError as exc:
+        for hint in ("ENVBUILD_K8S_TOKEN", "ServiceAccount", "kubeconfig"):
+            assert hint in str(exc), exc
+    finally:
+        k8s._SA_DIR = saved
+
+
+@check("infra: auth precedence is explicit token, then ServiceAccount, then kubeconfig")
+def _i_auth_order():
+    saved = k8s._SA_DIR
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        sa = tmp / "sa"
+        sa.mkdir()
+        (sa / "token").write_text("sa-token")
+        (sa / "ca.crt").write_text("")
+        (sa / "namespace").write_text("from-sa")
+        k8s._SA_DIR = sa
+
+        # An explicit token outranks a mounted ServiceAccount.
+        c = k8s.Client.resolve(token="explicit", api_server="https://api.example")
+        assert c.token == "explicit" and c.api_server == "https://api.example"
+
+        # With no explicit token, the ServiceAccount wins -- and supplies the
+        # namespace, which is why in-cluster needs no configuration at all.
+        c = k8s.Client.resolve()
+        assert c.token == "sa-token" and c.namespace == "from-sa"
+        assert c.api_server == "https://kubernetes.default.svc"
+    finally:
+        k8s._SA_DIR = saved
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("infra: an exec-plugin kubeconfig is refused with a reason, not half-used")
+def _i_exec_kubeconfig():
+    saved = k8s._SA_DIR
+    k8s._SA_DIR = Path("/nonexistent/serviceaccount")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        kc = tmp / "kubeconfig"
+        kc.write_text(json.dumps({          # JSON is valid YAML
+            "current-context": "c",
+            "contexts": [{"name": "c", "context": {"cluster": "k", "user": "u"}}],
+            "clusters": [{"name": "k", "cluster": {"server": "https://api.example"}}],
+            "users": [{"name": "u", "user": {"exec": {"command": "kubelogin"}}}],
+        }))
+        try:
+            k8s.Client.resolve(kubeconfig=str(kc))
+            raise AssertionError("exec-plugin kubeconfig was accepted")
+        except InfraError as exc:
+            # Running a helper binary is the shape being removed; say so.
+            assert "credential plugin" in str(exc), exc
+    finally:
+        k8s._SA_DIR = saved
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 @check("builder: nested registry keeps the job id in the path, flat folds it into the tag")
 def _k8s_naming():
-    b = K8sBuilder("job-abc", "default", "registry:5000")
+    b = mk_builder()
     b.attempt = 3
     assert b._image_name() == "registry:5000/envbuild/job-abc:a3"
 
-    b2 = K8sBuilder("job-abc", "default", "docker.io/mismplatform", flat_registry=True)
+    b2 = mk_builder(registry_push="docker.io/mismplatform", flat_registry=True)
     b2.attempt = 3
     assert b2._image_name() == "docker.io/mismplatform/envbuild:job-abc-a3"
 
 
 @check("builder: pod name is a valid, unique k8s object name")
 def _k8s_pod_name():
-    b = K8sBuilder("job-2026-09-14-a10a", "default", "registry:5000")
+    b = mk_builder(job_id="job-2026-09-14-a10a")
     b.attempt = 2
     name = b._pod_name()
     assert len(name) <= 63, name
@@ -692,25 +793,164 @@ def _k8s_step_match():
     assert step is not None and step.index == pkg_step.index, step
 
 
-@check("config: ENVBUILD_REGISTRY_PULL='' clears the default, not just unset")
+@check("config: an empty env override clears a config.ini value, not just unset")
 def _cfg_empty_override():
+    # deploy/agent-job.yaml sets ENVBUILD_K8S_TOKEN="" to mean "use the
+    # ServiceAccount this pod already has". If empty did not beat config.ini,
+    # an in-cluster run would try a stale token instead.
     import os
     import driver
-    os.environ["ENVBUILD_REGISTRY_PULL"] = ""
+    os.environ["ENVBUILD_K8S_TOKEN"] = ""
     try:
         cfg = driver.load_config(None)
-        assert cfg.get("verifier", "registry_pull") == ""
+        assert cfg.get("builder", "token") == ""
     finally:
-        del os.environ["ENVBUILD_REGISTRY_PULL"]
+        del os.environ["ENVBUILD_K8S_TOKEN"]
 
 
 @check("infra: InfraError is not a classifiable failure")
 def _i_not_classified():
     # Belt and braces: if one ever reaches the classifier, it must not be dressed
     # up as a repairable model failure with a confident action.
-    c = classify.classify("permission denied while trying to connect to the Docker "
-                          "daemon socket unix:///var/run/docker.sock", rung="L1")
+    c = classify.classify('pods is forbidden: User "system:serviceaccount:envbuild:'
+                          'envbuild" cannot create resource "pods"', rung="L1")
     assert c.action is None, c
+
+
+@check("builder: the build pod needs nothing that requires pods/exec")
+def _k8s_build_manifest():
+    # This is the security result of the whole design, so it is asserted rather
+    # than described: one container, no init containers, no sidecar. Anything
+    # that reappears here means bytes are moving through the API again, which
+    # means the Role needs pods/exec back.
+    b = mk_builder()
+    b.attempt = 1
+    pod = b._pod_manifest("p", "reg/envbuild/j:a1", "/workspace/context", 600)
+    spec = pod["spec"]
+    assert len(spec["containers"]) == 1, spec["containers"]
+    assert "initContainers" not in spec, spec
+    assert spec["automountServiceAccountToken"] is False
+    assert spec["activeDeadlineSeconds"] == 600
+    # Kaniko still writes the digest; the agent reads it off the shared volume.
+    args = spec["containers"][0]["args"]
+    assert any(a.startswith("--digest-file=") for a in args), args
+    assert any(a == "--context=dir:///workspace/context" for a in args), args
+
+
+@check("builder: the rendered Dockerfile reaches the pod on the work claim")
+def _k8s_build_writes_dockerfile():
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        client = FakeClient(exit_code=1, logs="INFO[0003] RUN pip install 'numpy<2'\nERROR")
+        b = K8sBuilder("job-abc", client, "registry:5000",
+                       work_pvc="envbuild-work", work_mount=str(tmp))
+        res = b.build(spec(), "", 600)
+        written = (tmp / "job-abc" / "a1" / "Dockerfile").read_text()
+        assert written == res.dockerfile and written.startswith("# generated by envbuild")
+        # The pod mounts exactly that attempt's directory, so two attempts of the
+        # same job cannot read each other's Dockerfile.
+        mount = res and client.created[0]["spec"]["containers"][0]["volumeMounts"][0]
+        assert mount["subPath"] == "job-abc/a1", mount
+        assert client.deleted == [client.created[0]["metadata"]["name"]]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("verifier: the verify pod is unprivileged, tokenless and network-denied")
+def _k8s_verify_manifest():
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        v = mk_verifier(work_mount=str(tmp))
+        pod = v._pod_manifest("p", "reg@sha256:x", "/models/mbmm", ["python", "run.py"],
+                              MountContract(), 300, network=False, env={"A": "1"})
+        spec_, meta = pod["spec"], pod["metadata"]
+        # Model code must not be handed a cluster credential.
+        assert spec_["automountServiceAccountToken"] is False
+        assert "serviceAccountName" not in spec_
+        # `--network none`, as a label the deny-all NetworkPolicy selects.
+        assert meta["labels"]["envbuild.io/network"] == "deny"
+        sec = spec_["containers"][0]["securityContext"]
+        assert sec["allowPrivilegeEscalation"] is False
+        assert sec["capabilities"]["drop"] == ["ALL"]
+        # Source is mounted read-only: a model cannot rewrite the corpus.
+        code = next(m for m in spec_["containers"][0]["volumeMounts"]
+                    if m["mountPath"] == MountContract().code_path)
+        assert code["readOnly"] is True and code["subPath"] == "mbmm", code
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("verifier: network=True drops the deny label, and L1 mounts no code")
+def _k8s_verify_network_and_l1():
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        v = mk_verifier(work_mount=str(tmp))
+        on = v._pod_manifest("p", "img", "/models/mbmm", ["true"], MountContract(),
+                             300, network=True, env=None)
+        # A pod no policy selects gets traffic; that is what "network on" means.
+        assert "envbuild.io/network" not in on["metadata"]["labels"]
+        l1 = v._pod_manifest("p", "img", "", ["true"], MountContract(), 300,
+                             network=False, env=None)
+        paths = [m["mountPath"] for m in l1["spec"]["containers"][0]["volumeMounts"]]
+        # L1 proves the image alone. Mounting code here would destroy the rung.
+        assert MountContract().code_path not in paths, paths
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("verifier: a pod log is reported as stderr, because k8s merges the streams")
+def _k8s_verify_run():
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        client = FakeClient(exit_code=1, logs="ModuleNotFoundError: No module named 'scipy'")
+        v = mk_verifier(client=client, work_mount=str(tmp))
+        res = v.run("img", "", ["python", "-c", "1"], MountContract(), 300)
+        assert not res.ok and res.exit_code == 1
+        # The classifier reads stderr; a merged stream in stdout would be invisible.
+        assert "ModuleNotFoundError" in res.stderr and res.stdout == ""
+        assert classify.classify(res.stderr, rung="L1").failure_class == "MISSING_DEPENDENCY"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("registry: a repository is not mistaken for a host")
+def _reg_parse():
+    # `mismplatform/envbuild` parsing as host `mismplatform` is how you spend an
+    # afternoon, so the host rule is asserted in both directions.
+    assert registry.parse_ref("python:3.11-slim") == (
+        "registry-1.docker.io", "library/python", "3.11-slim")
+    assert registry.parse_ref("mismplatform/envbuild:job-a1") == (
+        "registry-1.docker.io", "mismplatform/envbuild", "job-a1")
+    assert registry.parse_ref("registry:5000/envbuild/job/x:a2") == (
+        "registry:5000", "envbuild/job/x", "a2")
+    assert registry.parse_ref("ghcr.io/org/repo@sha256:" + "a" * 64) == (
+        "ghcr.io", "org/repo", "sha256:" + "a" * 64)
+
+
+@check("registry: image size sums the config and every layer")
+def _reg_size():
+    saved = registry.manifest
+    registry.manifest = lambda image, timeout_s=120: (
+        "sha256:" + "b" * 64,
+        {"mediaType": "application/vnd.oci.image.manifest.v1+json",
+         "config": {"size": 7}, "layers": [{"size": 100}, {"size": 2000}]})
+    try:
+        assert registry.image_size("x:1") == 2107
+    finally:
+        registry.manifest = saved
+
+
+@check("registry: an unreadable manifest is None, never a crashed build")
+def _reg_size_soft():
+    saved = registry.manifest
+    def boom(image, timeout_s=120):
+        raise registry.RegistryError("401")
+    registry.manifest = boom
+    try:
+        # A missing size must not fail a build that otherwise succeeded.
+        assert registry.image_size("x:1") is None
+    finally:
+        registry.manifest = saved
 
 
 # ---------------------------------------------------------------- record

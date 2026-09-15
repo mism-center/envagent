@@ -1,70 +1,68 @@
 #!/usr/bin/env bash
-# Headless envbuild run, same ergonomics as scratch/pi-agent/run.sh.
+# Fire one envbuild run as a Kubernetes Job.
 #
-#   export AZURE_OPENAI_BASE_URL="https://<resource>.cognitiveservices.azure.com/openai/v1/"
-#   export AZURE_OPENAI_API_KEY="..."          # from your secret store, NOT from a file
-#   ./run.sh ../MBMM mism:model/mbmm
+#   ./run.sh /models/mbmm mism:model/mbmm metadata-package
 #
-# Anthropic instead: export ANTHROPIC_API_KEY and the provider is inferred.
+# This is a TEST SCRIPT. It uses your own kubectl to create the Job -- the agent
+# never sees your credential; inside the cluster it authenticates as the
+# `envbuild` ServiceAccount, which can create pods and read their logs and
+# nothing else. Eventually the execution platform fires this from model
+# discovery; keeping it at pod level is what makes that a small change.
 #
-# API KEY FROM HOST ENV -- never hardcoded here. A key pasted into a tracked
-# script is a key you have to rotate, and it stays in git history after you
-# delete the line.
+# One-time cluster setup, before the first run:
 #
-# Unlike the biomodel-annotator runner this uses compose, not a bare `docker
-# run`: the agent needs a kubeconfig, a registry credential file and the docker
-# socket wired up together, and compose is where that wiring lives.
+#   kubectl apply -f deploy/envbuild.yaml
+#   kubectl -n envbuild create secret generic envbuild-registry-auth \
+#       --from-file=.dockerconfigjson=$HOME/.docker/config.json \
+#       --type=kubernetes.io/dockerconfigjson
+#   kubectl -n envbuild create secret generic envbuild-llm \
+#       --from-literal=AZURE_OPENAI_API_KEY=... \
+#       --from-literal=AZURE_OPENAI_BASE_URL=...
 #
-# On the hardening flags in the pi-agent runner (--cap-drop=ALL etc.): they are
-# deliberately NOT copied here. This container mounts /var/run/docker.sock, which
-# is root-equivalent on the host, so dropping capabilities inside the container
-# buys approximately nothing. Phase 0 is trusted-corpus only for this reason; the
-# isolation story is the infra team's Builder/Verifier split, not container flags.
+# Credentials live in those Secrets, never in this file: a key pasted into a
+# tracked script is a key you have to rotate, and it stays in git history after
+# you delete the line.
 
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-REPO_HOST="${1:-}"
-if [ -z "$REPO_HOST" ]; then
-  echo "usage: $0 <path-to-model-repo> [model-id] [annotation-subpath]" >&2
-  echo "   e.g. $0 ../MBMM mism:model/mbmm metadata-package" >&2
+NS="${ENVBUILD_NAMESPACE:-envbuild}"
+MODELS_PVC="${ENVBUILD_MODELS_PVC:-}"
+
+MODEL_REPO="${1:-}"
+if [ -z "$MODEL_REPO" ]; then
+  echo "usage: $0 <model-path-under-/models> [model-id] [annotation-subpath]" >&2
+  echo "   e.g. $0 /models/mbmm mism:model/mbmm metadata-package" >&2
   exit 64
 fi
-REPO_HOST="$(cd "$REPO_HOST" && pwd)"        # absolute; bind mounts need it
-
-if [ -z "${AZURE_OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "$0: export AZURE_OPENAI_API_KEY (+ AZURE_OPENAI_BASE_URL) or ANTHROPIC_API_KEY first." >&2
+if [ -z "$MODELS_PVC" ]; then
+  echo "$0: set ENVBUILD_MODELS_PVC to the claim the model artifacts live on." >&2
   exit 78
 fi
 
-export MODEL_ID="${2:-local:$(basename "$REPO_HOST")}"
-# Annotation path is resolved INSIDE the container, under the mount point.
+MODEL_ID="${2:-local:$(basename "$MODEL_REPO")}"
 ANNOTATION_SUB="${3:-metadata-package}"
-if [ -e "$REPO_HOST/$ANNOTATION_SUB" ]; then
-  export ANNOTATION="/workspace/repo/$ANNOTATION_SUB"
-else
-  echo "$0: no $ANNOTATION_SUB in $REPO_HOST -- running without an annotation." >&2
-  echo "     Expect L1 at best: L2/L3 need a declared entry point." >&2
-  export ANNOTATION=""
-fi
+ANNOTATION="$MODEL_REPO/$ANNOTATION_SUB"
 
-# The agent runs as uid 1000 and must join whatever group owns the socket. Read
-# it off the socket rather than looking up a group called "docker": rootless and
-# Docker Desktop setups do not always have one, and guessing costs a whole build.
-export DOCKER_GID="${DOCKER_GID:-$(stat -c %g /var/run/docker.sock 2>/dev/null || true)}"
-if [ -z "$DOCKER_GID" ]; then
-  echo "$0: cannot read the gid of /var/run/docker.sock -- is docker running?" >&2
-  exit 78
-fi
+# Job names are DNS labels: lowercase alphanumerics and dashes, <=63 chars.
+JOB="$(date +%Y%m%d-%H%M%S)-$(basename "$MODEL_REPO" | tr '[:upper:]_.' '[:lower:]--' \
+        | tr -cd 'a-z0-9-' | cut -c1-20)"
 
-mkdir -p outputs
-# No local build service to start: the build runs in-cluster (Kaniko) and pushes
-# to a real registry. The only local daemon involved is the one that verifies.
-docker compose run --rm \
-  -v "$REPO_HOST:/workspace/repo:ro" \
-  agent
+for s in envbuild-registry-auth envbuild-llm; do
+  kubectl -n "$NS" get secret "$s" >/dev/null 2>&1 || {
+    echo "$0: secret $s missing in namespace $NS -- see the header of this script." >&2
+    exit 78
+  }
+done
 
-echo
-echo "records:"
-tail -n 1 outputs/verdicts.jsonl 2>/dev/null || echo "  (no verdict written -- check the log above)"
+sed -e "s|__JOB__|$JOB|g" \
+    -e "s|__MODEL_ID__|$MODEL_ID|g" \
+    -e "s|__MODEL_REPO__|$MODEL_REPO|g" \
+    -e "s|__ANNOTATION__|$ANNOTATION|g" \
+    -e "s|__MODELS_PVC__|$MODELS_PVC|g" \
+    deploy/agent-job.yaml | kubectl -n "$NS" apply -f -
+
+echo "job: envbuild-$JOB"
+echo "logs: kubectl -n $NS logs -f job/envbuild-$JOB"
+echo "records land on the work claim under /work/records"

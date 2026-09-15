@@ -1,28 +1,26 @@
 """L0: turn an EnvSpec into a pushed, digest-addressed image via Kaniko.
 
-This module is one half of the seam the infra team builds against. `Builder` is
-a Protocol with exactly two methods; Phase 0 ships `K8sBuilder`, they ship
-whatever their own cluster runs, and driver.py never changes.
+This module is one half of the seam the infra team builds against. `Builder` is a
+Protocol with exactly two methods; Phase 0 ships `K8sBuilder`, they ship whatever
+their own cluster runs, and driver.py never changes.
 
 Build and verify are deliberately *separate* protocols: they are different pods
 with different isolation requirements, which is what makes gVisor-on-execution a
 drop-in later rather than a rewrite.
 
 Kaniko and not BuildKit: BuildKit needs either privileged mode or (rootless) an
-`Unconfined` seccomp profile plus privilege escalation for its uid-mapping
-helper (`newuidmap`). Many clusters' admission policy denies both outright.
-Kaniko builds a Dockerfile in pure userspace -- no privileged mode, no custom
-seccomp, no uid-mapping helper -- so it runs under that policy.
+`Unconfined` seccomp profile plus privilege escalation for its uid-mapping helper
+(`newuidmap`). Many clusters' admission policy denies both outright. Kaniko builds
+a Dockerfile in pure userspace -- no privileged mode, no custom seccomp, no
+uid-mapping helper -- so it runs under that policy.
 
-Kaniko has no gRPC control connection, so the two things a build daemon gives
-you for free -- "send the build request" and "read back progress" -- are done by
-shelling out to `kubectl`: a Pod is the connection, its logs are the progress
-stream. The wrinkle that follows: kubectl can only stage files into, or read
-files out of, a *running* container, and Kaniko's own container exits the moment
-the build ends -- so a small `busybox` init container runs as a native sidecar
-(`restartPolicy: Always`, k8s 1.28+) for the pod's whole lifetime, used once
-before the build (stage the context in) and once after (read the digest file
-out), with Kaniko itself as the sole regular container in between.
+**Bytes move over a mounted volume, never over the API.** The agent writes the
+rendered Dockerfile into its own scratch directory on the work PVC; the build pod
+mounts the same claim and reads it; Kaniko writes `digest.txt` back to that
+directory and the agent reads it off its own mount after the pod exits. That is
+why there is no init container, no sidecar, no `.ready`/`.done` handshake and no
+`kubectl cp` -- and, more to the point, why the ServiceAccount never needs
+`pods/exec`. See k8s.py.
 
 `failed_step_index` is the non-negotiable part. Without it the classifier sees a
 wall of text; with it, the repair prompt gets "the apt layer failed, here are the
@@ -33,10 +31,8 @@ Kaniko echoes each rendered instruction on its own INFO line, which is what
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
-import subprocess
 import time
 import uuid
 from dataclasses import dataclass, asdict
@@ -46,13 +42,8 @@ from typing import Protocol
 from envspec import EnvSpec, Step, render
 from errors import InfraError
 
-_UNREACHABLE = re.compile(
-    r"Unable to connect to the server|connection refused|no such host|"
-    r"context deadline exceeded|dial tcp.*timeout|TLS handshake timeout",
-    re.IGNORECASE)
-
-# Kaniko logs the literal rendered instruction on its own INFO line (color
-# ANSI codes and a [seconds] timestamp first, no "Step N/M" the way classic
+# Kaniko logs the literal rendered instruction on its own INFO line (color ANSI
+# codes and a [seconds] timestamp first, no "Step N/M" the way classic
 # `docker build` prints -- confirmed against a real build, not assumed):
 #   \x1b[36mINFO\x1b[0m[0014] RUN pip install ...
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -62,9 +53,9 @@ _INSTRUCTION = re.compile(
     r"VOLUME|STOPSIGNAL|SHELL|ONBUILD|HEALTHCHECK)\b")
 _WS = re.compile(r"[\s\\]+")
 
-_WORKSPACE = "/workspace"
-_STAGE_IN = "stage-in"
-_STAGE_OUT = "stage-out"
+# Where the work PVC is mounted *inside the build pod*. The agent sees the same
+# bytes at its own mount point plus the job/attempt subPath.
+_POD_WORK = "/workspace"
 _MAIN = "kaniko"
 
 
@@ -92,9 +83,14 @@ class BuildResult:
 
 
 class Builder(Protocol):
-    """Seam: swap K8sBuilder for the infra team's in-cluster builder."""
+    """Seam: swap K8sBuilder for the infra team's in-cluster builder.
 
-    def build(self, spec: EnvSpec, context_tar: bytes, timeout_s: int) -> BuildResult: ...
+    `context_dir` is a path on a volume both this process and the build pod can
+    read -- not a tar. It used to be `bytes`, streamed in with `kubectl cp`; the
+    shared PVC made both the tar and the streaming unnecessary.
+    """
+
+    def build(self, spec: EnvSpec, context_dir: str, timeout_s: int) -> BuildResult: ...
     def cleanup(self, job_id: str) -> None: ...
 
 
@@ -106,11 +102,10 @@ def match_step(logged_instruction: str, steps: list[Step]) -> Step | None:
     """A rendered instruction Kaniko echoed -> the EnvSpec-tagged step that
     produced it.
 
-    ponytail: longest-common-prefix scoring, not a real parser. Kaniko echoes
-    the instruction verbatim (flattened onto one line), so this is exact in
-    practice; if a future executor starts truncating the echo, switch to
-    emitting an explicit `# envbuild:step=<i>` comment per instruction and match
-    on that.
+    ponytail: longest-common-prefix scoring, not a real parser. Kaniko echoes the
+    instruction verbatim (flattened onto one line), so this is exact in practice;
+    if a future executor starts truncating the echo, switch to emitting an
+    explicit `# envbuild:step=<i>` comment per instruction and match on that.
     """
     body = _norm(logged_instruction)
     best, best_score = None, 0
@@ -127,8 +122,8 @@ def match_step(logged_instruction: str, steps: list[Step]) -> Step | None:
 
 
 def match_kaniko_step(logs: str, steps: list[Step]) -> Step | None:
-    """Last rendered instruction Kaniko logged before the failure, mapped back
-    to the EnvSpec field that produced it."""
+    """Last rendered instruction Kaniko logged before the failure, mapped back to
+    the EnvSpec field that produced it."""
     last_text = None
     for raw in logs.splitlines():
         m = _KANIKO_LOG_LINE.match(_ANSI.sub("", raw).strip())
@@ -140,267 +135,182 @@ def match_kaniko_step(logs: str, steps: list[Step]) -> Step | None:
 
 
 class K8sBuilder:
-    """kubectl -> a Kaniko Pod -> a registry. No build daemon anywhere."""
+    """One Kaniko Pod per attempt. Talks to the API server; passes bytes on a PVC."""
 
-    def __init__(self, job_id: str, namespace: str, registry: str,
+    def __init__(self, job_id: str, client, registry: str,
+                 work_pvc: str, work_mount: str,
+                 models_pvc: str = "", models_mount: str = "",
                  kaniko_image: str = "gcr.io/kaniko-project/executor:v1.23.2",
-                 helper_image: str = "busybox:1.36",
                  docker_config_secret: str = "envbuild-registry-auth",
-                 insecure_registry: bool = False, flat_registry: bool = False,
-                 kubeconfig: str | None = None,
-                 workdir: str | Path = "/tmp/envbuild"):
+                 insecure_registry: bool = False, flat_registry: bool = False):
         self.job_id = job_id
-        self.namespace = namespace
+        self.client = client
         self.registry = registry.rstrip("/")
+        self.work_pvc = work_pvc
+        self.work_mount = Path(work_mount)
+        self.models_pvc = models_pvc
+        self.models_mount = models_mount
         self.kaniko_image = kaniko_image
-        self.helper_image = helper_image
         self.docker_config_secret = docker_config_secret
         self.insecure = insecure_registry
         # Docker Hub (and similar) allow exactly namespace/repository -- no
-        # deeper nesting -- unlike registry:2 / GHCR / ECR, which all tolerate
-        # an arbitrary path. A flat registry needs job identity folded into the
-        # tag instead of the path.
+        # deeper nesting -- unlike registry:2 / GHCR / ECR, which all tolerate an
+        # arbitrary path. A flat registry needs job identity folded into the tag
+        # instead of the path.
         self.flat_registry = flat_registry
-        self.kubeconfig = kubeconfig
-        self.workdir = Path(workdir) / job_id
         self.attempt = 0
 
-    # -- kubectl plumbing --------------------------------------------------
-    def _kubectl(self, args: list[str], timeout: int = 60, check: bool = False,
-                 input_text: str | None = None):
-        base = ["kubectl"]
-        if self.kubeconfig:
-            base += ["--kubeconfig", self.kubeconfig]
-        try:
-            return subprocess.run(base + args, capture_output=True, text=True,
-                                  timeout=timeout, check=check, input=input_text)
-        except FileNotFoundError as exc:
-            raise InfraError("kubectl is not on PATH.") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise InfraError(f"kubectl {' '.join(args[:2])} timed out after {timeout}s") from exc
-
+    # -- preflight -------------------------------------------------------
     def check_builder(self) -> str:
-        """Preflight: can we even talk to the cluster and act in this namespace."""
-        out = self._kubectl(["auth", "can-i", "create", "pods", "-n", self.namespace])
-        if out.returncode != 0 or out.stdout.strip() != "yes":
+        """Can we create the pods we are about to create? Cheap, and it turns a
+        wasted attempt into an immediate, actionable message."""
+        if not self.client.can_i("create", "pods"):
             raise InfraError(
-                f"cannot create pods in namespace {self.namespace!r}: "
-                f"{(out.stderr or out.stdout).strip()[:300]}\n"
-                "  Check ENVBUILD_KANIKO_KUBECONFIG / ENVBUILD_KANIKO_NAMESPACE.")
+                f"not allowed to create pods in namespace "
+                f"{self.client.namespace!r}. Apply deploy/rbac.yaml and run as "
+                f"that ServiceAccount.")
         return "ok"
 
-    # -- registry credentials ------------------------------------------------
-    def ensure_registry_secret(self, dockerconfigjson_path: str | Path) -> None:
-        """Idempotent: (re)create the Secret Kaniko reads its push credentials
-        from. Safe to call every attempt -- `kubectl apply` no-ops when nothing
-        changed."""
-        out = self._kubectl([
-            "create", "secret", "generic", self.docker_config_secret,
-            "-n", self.namespace,
-            f"--from-file=.dockerconfigjson={dockerconfigjson_path}",
-            "--type=kubernetes.io/dockerconfigjson",
-            "--dry-run=client", "-o", "yaml",
-        ])
-        if out.returncode != 0:
-            raise InfraError(f"could not render registry secret: {out.stderr.strip()[:300]}")
-        applied = self._kubectl(["apply", "-f", "-"], input_text=out.stdout)
-        if applied.returncode != 0:
-            raise InfraError(f"could not apply registry secret: {applied.stderr.strip()[:300]}")
-
-    # -- naming --------------------------------------------------------------
+    # -- naming ----------------------------------------------------------
     def _image_repo(self) -> str:
         if self.flat_registry:
             return f"{self.registry}/envbuild"
         return f"{self.registry}/envbuild/{self.job_id}"
 
     def _image_name(self) -> str:
+        # Unique per attempt in both layouts, which is what makes it safe to read
+        # the digest back by tag if digest.txt is ever missing.
         tag = f"{self.job_id}-a{self.attempt}" if self.flat_registry else f"a{self.attempt}"
         return f"{self._image_repo()}:{tag}"
 
     def _pod_name(self) -> str:
-        # k8s object names: lowercase alnum + '-', <=63 chars. job_id is
-        # already that shape; the attempt/random suffix just needs trimming.
+        # k8s object names: lowercase alnum + '-', <=63 chars. job_id is already
+        # that shape; the attempt/random suffix just needs trimming.
         base = f"envbuild-{self.job_id}-a{self.attempt}".lower()
         return base[:55] + "-" + uuid.uuid4().hex[:6]
 
-    # -- pod manifest --------------------------------------------------------
-    def _pod_manifest(self, pod_name: str, name: str) -> dict:
-        insecure_args = []
+    # -- scratch ---------------------------------------------------------
+    def _sub_path(self) -> str:
+        """Where this attempt's scratch lives, relative to the work claim root."""
+        return f"{self.job_id}/a{self.attempt}"
+
+    def _scratch(self) -> Path:
+        return self.work_mount / self._sub_path()
+
+    # -- pod manifest ----------------------------------------------------
+    def _pod_manifest(self, pod_name: str, name: str, context: str,
+                      timeout_s: int) -> dict:
+        args = [
+            f"--dockerfile={_POD_WORK}/Dockerfile",
+            f"--context=dir://{context}",
+            f"--destination={name}",
+            f"--digest-file={_POD_WORK}/digest.txt",
+            "--cache=false",   # Phase 0: correctness first, cache export is a later win
+        ]
         if self.insecure:
-            insecure_args = ["--insecure", "--insecure-pull", "--skip-tls-verify",
-                             "--skip-tls-verify-pull"]
+            args += ["--insecure", "--insecure-pull", "--skip-tls-verify",
+                     "--skip-tls-verify-pull"]
+
+        mounts = [{"name": "work", "mountPath": _POD_WORK,
+                   "subPath": self._sub_path()},
+                  {"name": "docker-config", "mountPath": "/kaniko/.docker"}]
+        volumes = [
+            {"name": "work", "persistentVolumeClaim": {"claimName": self.work_pvc}},
+            {"name": "docker-config", "secret": {
+                "secretName": self.docker_config_secret,
+                "items": [{"key": ".dockerconfigjson", "path": "config.json"}]}},
+        ]
+        # `installed` mode builds FROM the model source, so the models claim comes
+        # along -- read-only, at the same path the agent sees it, so `context` is
+        # the same string on both sides.
+        if context != f"{_POD_WORK}/context" and self.models_pvc:
+            mounts.append({"name": "models", "mountPath": self.models_mount,
+                           "readOnly": True})
+            volumes.append({"name": "models", "persistentVolumeClaim": {
+                "claimName": self.models_pvc, "readOnly": True}})
+
         return {
             "apiVersion": "v1",
             "kind": "Pod",
-            "metadata": {"name": pod_name, "namespace": self.namespace,
+            "metadata": {"name": pod_name, "namespace": self.client.namespace,
                          "labels": {"app": "envbuild-kaniko", "job-id": self.job_id}},
             "spec": {
                 "restartPolicy": "Never",
-                "initContainers": [
-                    {
-                        # Classic (non-sidecar) init container: k8s guarantees
-                        # this COMPLETES before Kaniko starts, which is the
-                        # actual guarantee needed here -- a sidecar only has to
-                        # be *running*, which races Kaniko's own start instead
-                        # of blocking it.
-                        "name": _STAGE_IN,
-                        "image": self.helper_image,
-                        "command": ["sh", "-c",
-                                    f"until [ -f {_WORKSPACE}/.ready ]; do sleep 1; done"],
-                        "volumeMounts": [{"name": "workspace", "mountPath": _WORKSPACE}],
-                    },
-                    {
-                        # Native sidecar (restartPolicy: Always, k8s 1.28+):
-                        # stays running for the pod's whole life, which is what
-                        # lets `kubectl exec` read the digest file back out
-                        # after Kaniko's own container has already terminated.
-                        "name": _STAGE_OUT,
-                        "image": self.helper_image,
-                        "restartPolicy": "Always",
-                        "command": ["sh", "-c",
-                                    f"until [ -f {_WORKSPACE}/.done ]; do sleep 1; done"],
-                        "volumeMounts": [{"name": "workspace", "mountPath": _WORKSPACE}],
-                    },
-                ],
+                # The kubelet owns the timeout. Nothing here needs the API, so it
+                # gets no token to lose.
+                "activeDeadlineSeconds": timeout_s,
+                "automountServiceAccountToken": False,
                 "containers": [{
                     "name": _MAIN,
                     "image": self.kaniko_image,
-                    "args": [
-                        f"--dockerfile={_WORKSPACE}/dockerfile/Dockerfile",
-                        f"--context=dir://{_WORKSPACE}/context",
-                        f"--destination={name}",
-                        f"--digest-file={_WORKSPACE}/digest.txt",
-                        "--cache=false",  # Phase 0: correctness first, cache export is a later win
-                        *insecure_args,
-                    ],
-                    "volumeMounts": [
-                        {"name": "workspace", "mountPath": _WORKSPACE},
-                        {"name": "docker-config", "mountPath": "/kaniko/.docker"},
-                    ],
+                    "args": args,
+                    "volumeMounts": mounts,
                 }],
-                "volumes": [
-                    {"name": "workspace", "emptyDir": {}},
-                    {"name": "docker-config", "secret": {
-                        "secretName": self.docker_config_secret,
-                        "items": [{"key": ".dockerconfigjson", "path": "config.json"}],
-                    }},
-                ],
+                "volumes": volumes,
             },
         }
 
-    def _wait_for(self, pod_name: str, jsonpath: str, want_nonempty: bool,
-                  deadline: float) -> str:
-        while time.monotonic() < deadline:
-            out = self._kubectl(["get", "pod", pod_name, "-n", self.namespace,
-                                 "-o", f"jsonpath={jsonpath}"])
-            val = (out.stdout or "").strip()
-            if (val != "") == want_nonempty:
-                return val
-            time.sleep(2)
-        raise InfraError(f"timed out waiting for pod {pod_name} ({jsonpath})")
-
     # -- Builder protocol ------------------------------------------------
-    def build(self, spec: EnvSpec, context_tar: bytes, timeout_s: int) -> BuildResult:
+    def build(self, spec: EnvSpec, context_dir: str, timeout_s: int) -> BuildResult:
         self.attempt += 1
         rendered = render(spec)
-        run_dir = self.workdir / f"a{self.attempt}"
-        ctx_dir, df_dir = run_dir / "context", run_dir / "df"
-        ctx_dir.mkdir(parents=True, exist_ok=True)
-        df_dir.mkdir(parents=True, exist_ok=True)
-        (df_dir / "Dockerfile").write_text(rendered.text)
+        scratch = self._scratch()
+        scratch.mkdir(parents=True, exist_ok=True)
+        (scratch / "Dockerfile").write_text(rendered.text)
+        digest_file = scratch / "digest.txt"
+        digest_file.unlink(missing_ok=True)      # never read a previous attempt's
 
-        # Mounted mode COPYs nothing, so it gets an empty context on purpose:
-        # a 200 MB context that no instruction reads is pure latency.
-        if spec.install_mode == "installed" and context_tar:
-            (run_dir / "context.tar").write_bytes(context_tar)
-            subprocess.run(["tar", "-xf", str(run_dir / "context.tar"), "-C", str(ctx_dir)],
-                           check=True, capture_output=True)
+        if spec.install_mode == "installed" and context_dir:
+            # Kaniko reads the model source in place, read-only, at the same path
+            # this process sees it.
+            context = str(context_dir)
+        else:
+            # Mounted mode COPYs nothing, so it gets an empty context on purpose:
+            # a 200 MB context that no instruction reads is pure latency.
+            (scratch / "context").mkdir(exist_ok=True)
+            context = f"{_POD_WORK}/context"
 
         name = self._image_name()
         pod_name = self._pod_name()
         started = time.monotonic()
-        deadline = started + timeout_s
-        manifest = self._pod_manifest(pod_name, name)
-
-        applied = self._kubectl(["apply", "-f", "-"], input_text=json.dumps(manifest))
-        if applied.returncode != 0:
-            raise InfraError(f"could not create build pod: {applied.stderr.strip()[:300]}")
+        self.client.create_pod(self._pod_manifest(pod_name, name, context, timeout_s))
 
         try:
-            return self._run_build(pod_name, name, rendered, deadline, started, timeout_s)
+            # Watch slightly past the kubelet's own deadline so the pod's
+            # DeadlineExceeded is what we observe, not our own impatience.
+            exit_code, note = self.client.wait_terminated(
+                pod_name, _MAIN, deadline=started + timeout_s + 30)
+            logs = self.client.pod_log(pod_name, _MAIN)
+            duration = time.monotonic() - started
+
+            if exit_code == 0:
+                digest = digest_file.read_text().strip() if digest_file.exists() else None
+                ref = f"{self._image_repo()}@{digest}" if digest else name
+                # image_bytes is filled by the verifier, which reads it off the
+                # registry manifest before deciding whether to run anything.
+                return BuildResult(ok=True, image_ref=ref, image_digest=digest,
+                                   image_bytes=None, stderr="", duration_s=duration,
+                                   dockerfile=rendered.text)
+
+            if exit_code is None:
+                # Never ran: a deadline, a pull failure, a scheduling refusal.
+                # Real build failures always produce an exit code.
+                return BuildResult(ok=False, stderr=f"{note}\n{logs[-4000:]}".strip(),
+                                   duration_s=duration, dockerfile=rendered.text)
+
+            step = match_kaniko_step(logs, rendered.steps)
+            return BuildResult(
+                ok=False,
+                failed_step_index=step.index if step else None,
+                failed_step_kind=step.kind if step else None,
+                failed_step_field=step.field if step else None,
+                stderr=logs[-20000:], duration_s=duration,
+                dockerfile=rendered.text,
+            )
         finally:
-            self._kubectl(["delete", "pod", pod_name, "-n", self.namespace,
-                           "--wait=false", "--ignore-not-found"], timeout=30)
-
-    def _run_build(self, pod_name, name, rendered, deadline, started, timeout_s) -> BuildResult:
-        run_dir = self.workdir / f"a{self.attempt}"
-        ctx_dir, df_dir = run_dir / "context", run_dir / "df"
-
-        # 1. Wait for the staging container to be running, then stage inputs.
-        self._wait_for(pod_name,
-                       "{.status.initContainerStatuses[0].state.running}",
-                       want_nonempty=True, deadline=deadline)
-        for src, dst in ((ctx_dir, f"{_WORKSPACE}/context"), (df_dir, f"{_WORKSPACE}/dockerfile")):
-            # Trailing "/." -- without it, kubectl cp nests the source dir's
-            # own basename one level deeper (e.g. .../dockerfile/df/Dockerfile
-            # instead of .../dockerfile/Dockerfile).
-            cp = self._kubectl(["cp", f"{src}/.", f"{self.namespace}/{pod_name}:{dst}",
-                                "-c", _STAGE_IN], timeout=120)
-            if cp.returncode != 0:
-                raise InfraError(f"failed to stage {src} into build pod: {cp.stderr.strip()[:300]}")
-        ready = self._kubectl(["exec", pod_name, "-n", self.namespace, "-c", _STAGE_IN,
-                               "--", "touch", f"{_WORKSPACE}/.ready"], timeout=30)
-        if ready.returncode != 0:
-            raise InfraError(f"failed to release build pod: {ready.stderr.strip()[:300]}")
-
-        # 2. Wait for Kaniko itself (the one regular container) to terminate.
-        try:
-            term = self._wait_for(pod_name,
-                                  "{.status.containerStatuses[0].state.terminated.exitCode}",
-                                  want_nonempty=True, deadline=deadline)
-        except InfraError:
-            logs = self._kubectl(["logs", pod_name, "-n", self.namespace, "-c", _MAIN],
-                                 timeout=30).stdout or ""
-            return BuildResult(ok=False, stderr=f"ENVBUILD_TIMEOUT: build exceeded {timeout_s}s\n"
-                               + logs[-4000:], duration_s=time.monotonic() - started,
-                               dockerfile=rendered.text)
-
-        logs_out = self._kubectl(["logs", pod_name, "-n", self.namespace, "-c", _MAIN], timeout=30)
-        logs = logs_out.stdout or ""
-        duration = time.monotonic() - started
-        exit_code = int(term)
-
-        if exit_code == 0:
-            digest = None
-            cat = self._kubectl(["exec", pod_name, "-n", self.namespace, "-c", _STAGE_OUT,
-                                 "--", "cat", f"{_WORKSPACE}/digest.txt"], timeout=30)
-            if cat.returncode == 0 and cat.stdout.strip():
-                digest = cat.stdout.strip()
-            self._kubectl(["exec", pod_name, "-n", self.namespace, "-c", _STAGE_OUT,
-                           "--", "touch", f"{_WORKSPACE}/.done"], timeout=30)
-            ref = f"{self._image_repo()}@{digest}" if digest else name
-            # image_bytes is filled by the verifier after it pulls: measuring it
-            # here would mean a second registry round-trip.
-            return BuildResult(ok=True, image_ref=ref, image_digest=digest,
-                               image_bytes=None, stderr="", duration_s=duration,
-                               dockerfile=rendered.text)
-
-        self._kubectl(["exec", pod_name, "-n", self.namespace, "-c", _STAGE_OUT,
-                       "--", "touch", f"{_WORKSPACE}/.done"], timeout=30)
-        if _UNREACHABLE.search(logs) or _UNREACHABLE.search(logs_out.stderr or ""):
-            raise InfraError(f"lost the cluster mid-build: {(logs_out.stderr or logs)[:300]}")
-
-        step = match_kaniko_step(logs, rendered.steps)
-        return BuildResult(
-            ok=False,
-            failed_step_index=step.index if step else None,
-            failed_step_kind=step.kind if step else None,
-            failed_step_field=step.field if step else None,
-            stderr=logs[-20000:], duration_s=duration,
-            dockerfile=rendered.text,
-        )
+            self.client.delete_pod(pod_name)
 
     def cleanup(self, job_id: str) -> None:
-        """Reclaim local staging dirs; the pod is already deleted per-attempt
-        in `build()`'s `finally`, so there's no cluster-side state to prune."""
-        shutil.rmtree(self.workdir.parent / job_id, ignore_errors=True)
+        """Drop this job's scratch. The pod is already deleted per attempt in
+        `build()`'s `finally`, so there is no cluster-side state to prune."""
+        shutil.rmtree(self.work_mount / job_id, ignore_errors=True)

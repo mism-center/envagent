@@ -71,25 +71,23 @@ replays L2–L3 against the existing image and skips the expensive part entirely
 
 ### Step 0 — Preconditions
 
-Confirm the repo is corpus-trusted. Then check the substrate:
+Confirm the repo is corpus-trusted. Then run the substrate check — the CLI does
+it for you, and it is one access review rather than a build:
 
 ```bash
-kubectl auth can-i create pods -n "${ENVBUILD_KANIKO_NAMESPACE:-default}"
-docker info >/dev/null          # verification only; the agent never builds through it
+envbuild init ...        # preflights before it does anything expensive
 ```
 
-Builds run as a Kaniko Pod in a Kubernetes cluster, so `kubectl` must be on
-`PATH` with a context that can create pods, and the push registry must be
-reachable **from the cluster** (`ENVBUILD_REGISTRY_PUSH`). Kaniko reads its push
-credentials from an in-cluster Secret, created once per cluster:
+**You have no cluster tools and do not need any.** There is no `kubectl` and no
+`docker` in this image. Builds and verification runs are pods the CLI creates
+over the Kubernetes API, as a ServiceAccount that can create pods and read their
+logs and nothing else. It has **no `pods/exec`** — if you catch yourself wanting
+a shell inside a running container, the answer is a rung, not a shell.
 
-```bash
-kubectl create secret generic envbuild-registry-auth \
-    --from-file=.dockerconfigjson=$HOME/.docker/config.json \
-    --type=kubernetes.io/dockerconfigjson
-```
-
-If any of this is missing, say so — do not try to build without it.
+Cluster setup is an operator's job, done once, from `deploy/envbuild.yaml` plus
+two Secrets (`envbuild-registry-auth`, `envbuild-llm`). If preflight reports a
+missing RBAC rule, an unreachable API server or a missing claim, say so and write
+an `error` verdict — do not try to work around it.
 
 ### Step 1 — `init`
 
@@ -160,7 +158,8 @@ envbuild verdict --job-id "$JOB" --status escalated --reason "MATLAB toolchain"
 envbuild verdict --job-id "$JOB" --status error    --reason "cluster unreachable"
 ```
 
-`verdict` also tears down: containers, named volumes, pulled images, build cache.
+`verdict` also tears down: any pods this job created, and its scratch directory
+on the work claim.
 Budget exhaustion writes its own verdict and tears down for you. If anything
 crashes mid-run, call `verdict --status error` before you stop.
 

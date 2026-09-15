@@ -1,0 +1,86 @@
+# One envbuild run, as a Job. `run.sh` fills the placeholders and applies it;
+# eventually the execution platform will do the same thing from model discovery.
+# Keep it at pod level -- there is no queue and no long-lived service, because
+# Phase 0 has no queue to consume.
+#
+# Placeholders `run.sh` substitutes: __JOB__ __MODEL_ID__ __MODEL_REPO__
+# __ANNOTATION__ __MODELS_PVC__
+#
+# Provider credentials come from a Secret created out of band, never from here:
+#   kubectl -n envbuild create secret generic envbuild-llm \
+#       --from-literal=AZURE_OPENAI_API_KEY=... \
+#       --from-literal=AZURE_OPENAI_BASE_URL=...
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: envbuild-__JOB__
+  namespace: envbuild
+spec:
+  backoffLimit: 0          # a retry would write a second attempt row for one job
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: envbuild-agent
+        job-id: __JOB__
+    spec:
+      restartPolicy: Never
+      serviceAccountName: envbuild
+      containers:
+        - name: agent
+          image: mismplatform/pi-envagent:develop
+          env:
+            - name: MODEL_ID
+              value: "__MODEL_ID__"
+            - name: MODEL_REPO
+              value: "__MODEL_REPO__"        # a path under /models
+            - name: ANNOTATION
+              value: "__ANNOTATION__"
+            - name: ENVBUILD_OUTPUTS
+              value: /work/records
+            # Empty on purpose: both say "use the ServiceAccount this pod
+            # already has", overriding anything config.ini carries.
+            - name: ENVBUILD_K8S_TOKEN
+              value: ""
+            - name: ENVBUILD_KANIKO_KUBECONFIG
+              value: ""
+            - name: ENVBUILD_WORK_PVC
+              value: envbuild-work
+            - name: ENVBUILD_WORK_MOUNT
+              value: /work
+            - name: ENVBUILD_MODELS_PVC
+              value: "__MODELS_PVC__"
+            - name: ENVBUILD_MODELS_MOUNT
+              value: /models
+          envFrom:
+            - secretRef:
+                name: envbuild-llm
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: models
+              mountPath: /models
+              readOnly: true
+            # Read-only, and only so the registry client can authenticate to
+            # read manifests. Kaniko gets its own copy; this one never pushes.
+            - name: docker-config
+              mountPath: /home/node/.docker
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: work
+          persistentVolumeClaim:
+            claimName: envbuild-work
+        - name: models
+          persistentVolumeClaim:
+            claimName: __MODELS_PVC__
+            readOnly: true
+        - name: docker-config
+          secret:
+            secretName: envbuild-registry-auth
+            items:
+              - key: .dockerconfigjson
+                path: config.json

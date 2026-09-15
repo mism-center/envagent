@@ -57,7 +57,8 @@ import record                                        # noqa: E402
 from builder import K8sBuilder                      # noqa: E402
 from errors import InfraError                        # noqa: E402
 from envspec import EnvSpec, MountContract, render   # noqa: E402
-from verifier import LocalDockerVerifier             # noqa: E402
+import k8s                                           # noqa: E402
+from verifier import K8sVerifier                     # noqa: E402
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -71,14 +72,17 @@ def load_config(path: str | None) -> configparser.ConfigParser:
         "builder": {"registry_push": "docker.io/mismplatform",
                     "insecure_registry": "false",
                     "flat_registry": "true",
-                    "namespace": "default",
+                    "namespace": "",
                     "kaniko_image": "gcr.io/kaniko-project/executor:v1.23.2",
-                    "helper_image": "busybox:1.36",
                     "docker_config_secret": "envbuild-registry-auth",
-                    "kubeconfig": ""},
-        "verifier": {"registry_pull": "localhost:5000",
-                     "helper_image": "busybox:1.36",
-                     "memory": ""},
+                    "kubeconfig": "",
+                    "token": "",
+                    "api_server": "",
+                    "work_pvc": "envbuild-work",
+                    "work_mount": "/work",
+                    "models_pvc": "",
+                    "models_mount": "/models"},
+        "verifier": {"memory": ""},
         "budgets": {"max_attempts": "5", "wall_clock_s": "1200",
                     "build_timeout_s": "600", "verify_timeout_s": "180",
                     "max_image_bytes": str(8 * 1024 ** 3),
@@ -88,15 +92,19 @@ def load_config(path: str | None) -> configparser.ConfigParser:
     cfg.read([str(SKILL_DIR / "config.ini")] + ([path] if path else []))
     for env, (sec, key) in {
         "ENVBUILD_REGISTRY_PUSH": ("builder", "registry_push"),
-        # Deliberately membership, not truthiness: a real external registry
-        # (Docker Hub) is one single, directly-pullable target, so the pull
-        # side needs to be an empty override, not just "unset" -- which
-        # requires the empty string itself to win over the default.
-        "ENVBUILD_REGISTRY_PULL": ("verifier", "registry_pull"),
         "ENVBUILD_REGISTRY_INSECURE": ("builder", "insecure_registry"),
         "ENVBUILD_REGISTRY_FLAT": ("builder", "flat_registry"),
         "ENVBUILD_KANIKO_NAMESPACE": ("builder", "namespace"),
         "ENVBUILD_KANIKO_KUBECONFIG": ("builder", "kubeconfig"),
+        # Deliberately membership, not truthiness: an empty value is a real
+        # setting here -- it is how an in-cluster run says "use the
+        # ServiceAccount", overriding whatever config.ini carries.
+        "ENVBUILD_K8S_TOKEN": ("builder", "token"),
+        "ENVBUILD_K8S_API_SERVER": ("builder", "api_server"),
+        "ENVBUILD_WORK_PVC": ("builder", "work_pvc"),
+        "ENVBUILD_WORK_MOUNT": ("builder", "work_mount"),
+        "ENVBUILD_MODELS_PVC": ("builder", "models_pvc"),
+        "ENVBUILD_MODELS_MOUNT": ("builder", "models_mount"),
         "ENVBUILD_OUTPUTS": ("paths", "outputs"),
     }.items():
         if env in os.environ:
@@ -149,13 +157,14 @@ def git_rev(repo: str) -> str:
 def preflight(cfg, state) -> dict:
     """Prove the substrate works before spending a build on finding out.
 
-    An unreachable daemon or builder is a deployment fault. Discovering it *after*
-    a ten-minute build costs an attempt of the budget and, worse, writes a row
-    saying the model failed for reasons nobody can reconstruct.
+    A missing RBAC rule or an unreachable API server is a deployment fault.
+    Discovering it *after* a ten-minute build costs an attempt of the budget and,
+    worse, writes a row saying the model failed for reasons nobody can
+    reconstruct.
     """
     checks = {}
-    checks["kaniko"] = make_builder(cfg, state).check_builder()
-    checks["dockerd"] = make_verifier(cfg, state).check_daemon()
+    checks["pods"] = make_builder(cfg, state).check_builder()
+    checks["logs"] = make_verifier(cfg, state).check_cluster()
     return checks
 
 
@@ -187,29 +196,52 @@ def builder_id(cfg) -> str:
     return "kaniko " + cfg.get("builder", "kaniko_image").rsplit(":", 1)[-1]
 
 
+def make_client(cfg, state):
+    """One Kubernetes credential, resolved the same way for both seams.
+
+    Namespace left empty in config means "whatever namespace this pod runs in",
+    which is the right default once the agent is itself a pod -- it cannot be
+    wrong, and it needs no configuration.
+    """
+    return k8s.Client.resolve(
+        namespace=cfg.get("builder", "namespace") or None,
+        token=cfg.get("builder", "token") or None,
+        api_server=cfg.get("builder", "api_server") or None,
+        kubeconfig=cfg.get("builder", "kubeconfig") or None,
+        workdir=job_dir(cfg, state["job_id"]),
+    )
+
+
 def make_builder(cfg, state) -> K8sBuilder:
-    """The one `Builder`. See builder.py's module docstring for why Kaniko and
-    not a build daemon."""
+    """The one `Builder`. See builder.py's module docstring for why Kaniko, and
+    why the context travels on a volume rather than through the API."""
     b = K8sBuilder(
         job_id=state["job_id"],
-        namespace=cfg.get("builder", "namespace"),
+        client=make_client(cfg, state),
         registry=cfg.get("builder", "registry_push"),
+        work_pvc=cfg.get("builder", "work_pvc"),
+        work_mount=cfg.get("builder", "work_mount"),
+        models_pvc=cfg.get("builder", "models_pvc"),
+        models_mount=cfg.get("builder", "models_mount"),
         kaniko_image=cfg.get("builder", "kaniko_image"),
-        helper_image=cfg.get("builder", "helper_image"),
         docker_config_secret=cfg.get("builder", "docker_config_secret"),
         insecure_registry=cfg.getboolean("builder", "insecure_registry"),
         flat_registry=cfg.getboolean("builder", "flat_registry"),
-        kubeconfig=cfg.get("builder", "kubeconfig") or None,
     )
     b.attempt = state["attempt"]          # keep image tags aligned with attempts
     return b
 
 
-def make_verifier(cfg, state) -> LocalDockerVerifier:
-    return LocalDockerVerifier(
+def make_verifier(cfg, state) -> K8sVerifier:
+    return K8sVerifier(
         job_id=state["job_id"],
-        helper_image=cfg.get("verifier", "helper_image"),
-        registry_pull=cfg.get("verifier", "registry_pull") or None,
+        client=make_client(cfg, state),
+        work_pvc=cfg.get("builder", "work_pvc"),
+        work_mount=cfg.get("builder", "work_mount"),
+        models_pvc=cfg.get("builder", "models_pvc"),
+        models_mount=cfg.get("builder", "models_mount"),
+        code_ref=state["repo"],
+        docker_config_secret=cfg.get("builder", "docker_config_secret"),
         memory=cfg.get("verifier", "memory") or None,
     )
 
@@ -301,7 +333,6 @@ def cmd_init(args, cfg) -> None:
         "best": {"rung": None, "spec": None, "image_ref": None, "image_digest": None},
         "forbidden": [],
         "patched_since_attempt": True,       # the draft counts as the first spec
-        "code_staged": False,
         "closed": False,
         "local_modules": ev.get("local_modules") or [],
     }
@@ -399,14 +430,10 @@ def cmd_attempt(args, cfg) -> None:
     builder, verifier = make_builder(cfg, state), make_verifier(cfg, state)
 
     # ---- L0 -----------------------------------------------------------
-    ctx = b""
-    if spec.install_mode == "installed":
-        try:
-            ctx = evidence_mod.make_tar(state["repo"], cfg.getint("budgets", "max_context_bytes"))
-        except ValueError as exc:
-            _finish_budget(cfg, state, str(exc))
+    # The build context is a path, not a tar: the build pod mounts the same
+    # models claim this process reads, so there is nothing to ship.
     try:
-        build = builder.build(spec, ctx, cfg.getint("budgets", "build_timeout_s"))
+        build = builder.build(spec, state["repo"], cfg.getint("budgets", "build_timeout_s"))
     except InfraError as exc:
         state["attempt"] -= 1                 # the attempt never happened
         _die_infra(cfg, state, exc)
@@ -419,25 +446,20 @@ def cmd_attempt(args, cfg) -> None:
     if build.ok:
         # ---- L1-L3 ------------------------------------------------------
         try:
-            # Pull once here (memoised in the verifier) so the size ceiling is
-            # checked against a real number before anything executes.
-            build.image_bytes = verifier.image_size(verifier.pull_ref(build.image_ref))
+            # Read off the registry manifest, so the size ceiling is checked
+            # against a real number before anything executes.
+            build.image_bytes = verifier.image_size(build.image_ref)
             if build.image_bytes and build.image_bytes > cfg.getint("budgets", "max_image_bytes"):
                 _finish_budget(cfg, state,
                                f"image size {build.image_bytes} exceeds max_image_bytes")
-            if not state["code_staged"]:
-                verifier.stage_code(state["job_id"],
-                                    evidence_mod.make_tar(state["repo"],
-                                                          cfg.getint("budgets", "max_context_bytes")))
-                state["code_staged"] = True
-            lad = ladder_mod.climb(verifier, build.image_ref, verifier.code_vol, spec,
+            lad = ladder_mod.climb(verifier, build.image_ref, verifier.code_ref, spec,
                                    state["entry"], state["command"],
                                    cfg.getint("budgets", "verify_timeout_s"),
                                    start=args.start,
                                    expect_outputs=bool(state.get("expect_outputs")))
         except InfraError as exc:
             # This is what turned a working L0 into an `UNKNOWN` corpus row: the
-            # daemon was unreachable, which says nothing about the model.
+            # substrate was unreachable, which says nothing about the model.
             state["attempt"] -= 1
             _die_infra(cfg, state, exc)
         except (RuntimeError, ValueError) as exc:
@@ -629,10 +651,7 @@ def cmd_reverify(args, cfg) -> None:
     verifier = make_verifier(cfg, state)
     started = time.time()
     try:
-        verifier.stage_code(state["job_id"],
-                            evidence_mod.make_tar(state["repo"],
-                                                  cfg.getint("budgets", "max_context_bytes")))
-        lad = ladder_mod.climb(verifier, ref, verifier.code_vol, spec, state["entry"],
+        lad = ladder_mod.climb(verifier, ref, verifier.code_ref, spec, state["entry"],
                                state["command"], cfg.getint("budgets", "verify_timeout_s"),
                                start=args.start,
                                expect_outputs=bool(state.get("expect_outputs")))

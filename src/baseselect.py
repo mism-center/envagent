@@ -6,15 +6,16 @@ turns out wrong.
 
 The digest resolution is the load-bearing half: `EnvSpec.base_image` must never
 reach the rendered Dockerfile as a bare tag, or a model that verified in March
-silently stops verifying in June and "verified" becomes a lie.
+silently stops verifying in June and "verified" becomes a lie. It is a registry
+read, not a docker call -- nothing in the cluster has a daemon.
 """
 
 from __future__ import annotations
 
-import json
 import re
-import subprocess
 from dataclasses import dataclass
+
+import registry
 
 # Rule table, first match wins. Order matters: conda beats plain python because
 # an environment.yml means the author already fought the solver and won.
@@ -153,36 +154,14 @@ def select(evidence: dict, annotation: dict | None = None) -> BaseChoice:
 def resolve_digest(image: str, timeout_s: int = 120) -> str:
     """tag -> `sha256:...`, once, at synthesis time.
 
-    Uses `docker buildx imagetools inspect` (talks to the registry, no pull) and
-    falls back to `docker manifest inspect`. Raises rather than returning a bare
-    tag: an unpinned base is worse than a failed job.
+    Asks the registry directly over HTTPS (see registry.py). It used to shell out
+    to `docker buildx imagetools inspect`; there is no docker daemon in the
+    cluster to shell to, and the question was always a registry read anyway.
+
+    Raises rather than returning a bare tag: an unpinned base is worse than a
+    failed job.
     """
-    attempts = [
-        ["docker", "buildx", "imagetools", "inspect", image, "--format", "{{.Manifest.Digest}}"],
-        ["docker", "manifest", "inspect", "--verbose", image],
-    ]
-    errors = []
-    for cmd in attempts:
-        try:
-            out = subprocess.run(cmd, capture_output=True, text=True,
-                                 timeout=timeout_s, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            errors.append(f"{cmd[1]}: {exc}")
-            continue
-        if out.returncode != 0:
-            errors.append(f"{cmd[1]}: {out.stderr.strip()[:200]}")
-            continue
-        text = out.stdout.strip()
-        m = re.search(r"sha256:[0-9a-f]{64}", text)
-        if m:
-            return m.group(0)
-        try:                                    # manifest inspect --verbose JSON
-            data = json.loads(text)
-            data = data[0] if isinstance(data, list) else data
-            d = data.get("Descriptor", {}).get("digest")
-            if d:
-                return d
-        except (json.JSONDecodeError, AttributeError, IndexError):
-            pass
-        errors.append(f"{cmd[1]}: no digest in output")
-    raise RuntimeError(f"could not resolve digest for {image}: {'; '.join(errors)}")
+    try:
+        return registry.resolve_digest(image, timeout_s)
+    except registry.RegistryError as exc:
+        raise RuntimeError(f"could not resolve digest for {image}: {exc}") from exc
