@@ -34,6 +34,11 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NS="${ENVBUILD_NAMESPACE:-default}"
 MODELS_PVC="${ENVBUILD_MODELS_PVC:-irods-pvc}"
 MODELS_MOUNT="${ENVBUILD_MODELS_MOUNT:-/models}"
+# The tag that actually matches this branch. :develop is built by CI from
+# `develop` and predates the in-cluster rewrite -- running it would look
+# correct and execute the old code. Point this back at :develop once this
+# branch merges.
+AGENT_IMAGE="${ENVBUILD_AGENT_IMAGE:-mismplatform/pi-envagent:k8s-test}"
 
 SUBPATH="${1:-}"
 if [ -z "$SUBPATH" ]; then
@@ -66,10 +71,12 @@ sed -e "s|__JOB__|$JOB|g" \
     -e "s|__MODEL_REPO__|$MODEL_REPO|g" \
     -e "s|__ANNOTATION__|$ANNOTATION|g" \
     -e "s|__MODELS_PVC__|$MODELS_PVC|g" \
+    -e "s|__AGENT_IMAGE__|$AGENT_IMAGE|g" \
     deploy/agent-job.yaml | kubectl -n "$NS" apply -f -
 
 echo "job:     envbuild-$JOB"
 echo "model:   $MODEL_REPO  (claim $MODELS_PVC, read-only)"
+echo "image:   $AGENT_IMAGE"
 echo "logs:    kubectl -n $NS logs -f job/envbuild-$JOB"
 echo "pods:    kubectl -n $NS get pods -l job-id=$JOB -w"
 echo "records: /work/records on the envbuild-work claim"

@@ -4,7 +4,7 @@
 # Phase 0 has no queue to consume.
 #
 # Placeholders `run.sh` substitutes: __JOB__ __MODEL_ID__ __MODEL_REPO__
-# __ANNOTATION__ __MODELS_PVC__
+# __ANNOTATION__ __MODELS_PVC__ __AGENT_IMAGE__
 #
 # Model artifacts on `irods-pvc` are laid out <model_id>/<version>/<files>, so
 # __MODEL_REPO__ is /models/<model_id>/<version> and the verify pod mounts that
@@ -42,7 +42,12 @@ spec:
       serviceAccountName: envbuild
       containers:
         - name: agent
-          image: mismplatform/pi-envagent:develop
+          image: __AGENT_IMAGE__
+          # Always, because the benchmark tag is mutable. Kubernetes defaults
+          # a non-:latest tag to IfNotPresent, so a node that already cached
+          # :k8s-test would keep running the OLD image after a re-push -- you
+          # fix something, re-run, and measure the thing you just replaced.
+          imagePullPolicy: Always
           env:
             - name: MODEL_ID
               value: "__MODEL_ID__"
