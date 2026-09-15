@@ -26,11 +26,11 @@ import io
 import shlex
 import tarfile
 import time
-import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Protocol
 
+import k8s
 import registry
 from envspec import MountContract
 from errors import InfraError
@@ -209,7 +209,7 @@ class K8sVerifier:
         record; `stdout` stays empty rather than carrying a duplicate copy of the
         same 20 KB.
         """
-        pod_name = f"envbuild-v-{self.job_id}-{uuid.uuid4().hex[:8]}".lower()[:63]
+        pod_name = k8s.object_name("envbuild-v", self.job_id)
         started = time.monotonic()
         self.client.create_pod(self._pod_manifest(
             pod_name, image_ref, code_ref, cmd, mount, timeout_s, network, env))

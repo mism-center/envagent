@@ -26,8 +26,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import ssl
 import time
+import uuid
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -43,6 +45,29 @@ _FATAL_WAITING = {
     "ImagePullBackOff", "ErrImagePull", "InvalidImageName",
     "CreateContainerConfigError", "CreateContainerError",
 }
+
+
+_NAME_BAD = re.compile(r"[^a-z0-9-]+")
+_NAME_RUNS = re.compile(r"-{2,}")
+
+
+def object_name(*parts: str, limit: int = 63) -> str:
+    """Build a valid RFC 1123 label out of arbitrary parts, with a random tail.
+
+    Kubernetes object names are lowercase alphanumerics and dashes, and must
+    START AND END on an alphanumeric. Trimming after the truncation is not
+    cosmetic: a job id that is a UUID lands on a dash roughly one cut in five,
+    and the API server then rejects the whole object with a separate validation
+    error for the name and for every label that carries it.
+
+    Anything the caller passes -- a model id with a colon, a path with slashes,
+    an id someone typed in caps -- is folded down rather than trusted.
+    """
+    tail = "-" + uuid.uuid4().hex[:6]
+    slug = "-".join(p for p in parts if p).lower()
+    slug = _NAME_RUNS.sub("-", _NAME_BAD.sub("-", slug)).strip("-")
+    slug = slug[:limit - len(tail)].rstrip("-")
+    return (slug or "envbuild") + tail
 
 
 def _b64(data: str) -> str:

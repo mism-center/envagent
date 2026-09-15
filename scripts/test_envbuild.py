@@ -763,6 +763,26 @@ def _k8s_naming():
     assert b2._image_name() == "docker.io/mismplatform/envbuild:job-abc-a3"
 
 
+@check("k8s: an object name always ends on an alphanumeric, whatever it is built from")
+def _k8s_object_name():
+    # The real failure: a UUID model id truncated onto a trailing dash, which the
+    # API server rejects with one error for the name and one for every label that
+    # carries it. Anything the caller hands us gets folded down, not trusted.
+    label = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+    for job_id in ("825c3a4f-dec1-4085-a1ae-495d043b1d5a",   # the one that broke
+                   "job-2026-09-15-a1b2",                     # the ordinary case
+                   "mism:model/1a2b3c",                       # colon and slash
+                   "UPPER_CASE_ID",                           # caps, underscore
+                   "x" * 80,                                  # longer than the limit
+                   "---",                                     # nothing usable at all
+                   ""):
+        name = k8s.object_name("envbuild", job_id, "a1")
+        assert label.match(name), name
+        assert len(name) <= 63, (len(name), name)
+    # Still unique per call -- two attempts must not collide on one pod name.
+    assert k8s.object_name("envbuild", "j", "a1") != k8s.object_name("envbuild", "j", "a1")
+
+
 @check("builder: pod name is a valid, unique k8s object name")
 def _k8s_pod_name():
     b = mk_builder(job_id="job-2026-09-14-a10a")

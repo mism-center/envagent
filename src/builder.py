@@ -34,11 +34,11 @@ from __future__ import annotations
 import re
 import shutil
 import time
-import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Protocol
 
+import k8s
 from envspec import EnvSpec, Step, render
 from errors import InfraError
 
@@ -184,10 +184,7 @@ class K8sBuilder:
         return f"{self._image_repo()}:{tag}"
 
     def _pod_name(self) -> str:
-        # k8s object names: lowercase alnum + '-', <=63 chars. job_id is already
-        # that shape; the attempt/random suffix just needs trimming.
-        base = f"envbuild-{self.job_id}-a{self.attempt}".lower()
-        return base[:55] + "-" + uuid.uuid4().hex[:6]
+        return k8s.object_name("envbuild", self.job_id, f"a{self.attempt}")
 
     # -- scratch ---------------------------------------------------------
     def _sub_path(self) -> str:

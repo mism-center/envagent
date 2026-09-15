@@ -54,10 +54,24 @@ MODEL_ID="${2:-local:$(echo "$SUBPATH" | tr / :)}"
 ANNOTATION_SUB="${3:-metadata-package}"
 ANNOTATION="$MODEL_REPO/$ANNOTATION_SUB"
 
-# Job names are DNS labels: lowercase alphanumerics and dashes, <=63 chars. The
-# subpath carries slashes and dots, so flatten before trimming.
-JOB="$(date +%Y%m%d-%H%M%S)-$(echo "$SUBPATH" | tr '[:upper:]/_.' '[:lower:]---' \
-        | tr -cd 'a-z0-9-' | cut -c1-24)"
+# Job names are DNS labels: lowercase alphanumerics and dashes, and they must
+# END on an alphanumeric. A model id that is a UUID truncates onto a dash about
+# one cut in five, and the API server then rejects the name and every label
+# carrying it -- five errors for one trailing character. Trim after the cut.
+#
+# Only the first 8 characters of the id are kept: the rest of a UUID is noise,
+# and dropping it leaves room for the version, which is the part that actually
+# tells two runs apart while you are watching `kubectl get pods`.
+sanitise() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | tr -s '-'
+}
+ID_PART="${SUBPATH%%/*}"
+VER_PART="${SUBPATH#*/}"
+[ "$VER_PART" = "$SUBPATH" ] && VER_PART=""      # no slash means no version
+SLUG="$(sanitise "$(printf '%.8s%s%s' "$ID_PART" "${VER_PART:+-}" "$VER_PART")")"
+SLUG="${SLUG#-}"; SLUG="${SLUG%-}"
+SLUG="$(printf '%s' "$SLUG" | cut -c1-28)"; SLUG="${SLUG%-}"
+JOB="$(date +%Y%m%d-%H%M%S)-${SLUG:-job}"
 
 for s in envbuild-registry-auth envbuild-llm; do
   kubectl -n "$NS" get secret "$s" >/dev/null 2>&1 || {
