@@ -99,7 +99,7 @@ class K8sVerifier:
             raise InfraError(
                 f"not allowed to read pod logs in namespace "
                 f"{self.client.namespace!r}; verification could not report "
-                f"anything it ran. Apply deploy/rbac.yaml.")
+                f"anything it ran. Apply deploy/envbuild.yaml.")
         return "ok"
 
     def image_size(self, ref: str) -> int | None:

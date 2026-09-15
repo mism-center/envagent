@@ -167,7 +167,7 @@ class K8sBuilder:
         if not self.client.can_i("create", "pods"):
             raise InfraError(
                 f"not allowed to create pods in namespace "
-                f"{self.client.namespace!r}. Apply deploy/rbac.yaml and run as "
+                f"{self.client.namespace!r}. Apply deploy/envbuild.yaml and run as "
                 f"that ServiceAccount.")
         return "ok"
 

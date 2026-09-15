@@ -685,7 +685,9 @@ def _i_builder():
         b.check_builder()
         raise AssertionError("a refused access review did not raise")
     except InfraError as exc:
-        assert "rbac" in str(exc).lower(), exc      # names the actual fix
+        # Must name the file that actually fixes it -- deploy/rbac.yaml was a
+        # plausible-looking path that has never existed.
+        assert "deploy/envbuild.yaml" in str(exc), exc
 
 
 @check("infra: no cluster credential at all is an InfraError naming every option")
