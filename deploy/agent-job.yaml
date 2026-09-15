@@ -10,10 +10,20 @@
 # __MODEL_REPO__ is /models/<model_id>/<version> and the verify pod mounts that
 # subPath read-only at the contract's code_path.
 #
-# Provider credentials come from a Secret created out of band, never from here:
+# Provider credentials come from a Secret created out of band, never from here.
+# The two Azure keys are the whole requirement -- entrypoint.sh infers both the
+# provider and the model from whichever credential is present:
 #   kubectl -n default create secret generic envbuild-llm \
 #       --from-literal=AZURE_OPENAI_API_KEY=... \
 #       --from-literal=AZURE_OPENAI_BASE_URL=...
+#   (or a single --from-literal=ANTHROPIC_API_KEY=...)
+#
+# Anything you would want to VARY across a benchmark -- AI_MODEL, AI_PROVIDER,
+# MAX_ATTEMPTS, PROMPT, MISM_GUID -- belongs in an optional ConfigMap instead,
+# so changing it needs no edit here and no new image:
+#   kubectl -n default create configmap envbuild-tuning \
+#       --from-literal=AI_MODEL=gpt-5.6-luna --from-literal=MAX_ATTEMPTS=3
+# Optional on purpose: absent, entrypoint.sh falls back to its own defaults.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -57,6 +67,12 @@ spec:
             - name: ENVBUILD_MODELS_MOUNT
               value: /models
           envFrom:
+            # Tuning first, credentials second. envFrom applies in order, so a
+            # Secret always wins over a ConfigMap anyone with edit rights can
+            # change -- a tuning knob must never be able to swap a credential.
+            - configMapRef:
+                name: envbuild-tuning
+                optional: true
             - secretRef:
                 name: envbuild-llm
           volumeMounts:
