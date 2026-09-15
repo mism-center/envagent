@@ -25,6 +25,16 @@ COPY --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/docker-buildx \
 # config.ini [builder] buildkit_version and compose.yaml.
 COPY --from=moby/buildkit:v0.24.0 /usr/bin/buildctl /usr/local/bin/buildctl
 
+# kubectl. Only the "kaniko" builder backend uses it (K8sBuilder shells out to
+# it -- a Pod is the build connection, its logs are the progress stream), but
+# it is baked in unconditionally so one image serves both backends. Pinned for
+# the same reason buildctl is: the build agent must not change under the corpus.
+ARG KUBECTL_VERSION=v1.33.1
+RUN curl -fsSL -o /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+  && chmod 0755 /usr/local/bin/kubectl \
+  && kubectl version --client=true --output=yaml >/dev/null
+
 # Install pi coding agent globally (still as root).
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 

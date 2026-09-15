@@ -1,0 +1,32 @@
+# TEMPORARY, for the AKS/Kaniko benchmark run. Not tracked/committed.
+# docker compose auto-merges this over compose.yaml for every command run from
+# this directory -- delete this file to go back to the local buildkitd +
+# registry:5000 setup with no other changes needed.
+#
+# Split topology: the build runs IN the cluster (Kaniko), verification runs
+# HERE against the local docker socket. Docker Hub is what both halves can
+# reach -- an in-cluster registry is not reachable from this host, and
+# registry:5000 is not reachable from the cluster.
+services:
+  agent:
+    # Never silently substitute Docker Hub's mismplatform/pi-envagent:develop
+    # for the locally built one -- the published tag has no kubectl, so the
+    # kaniko backend would die at the first build with the image looking right.
+    pull_policy: never
+    environment:
+      # Kaniko-in-AKS instead of local buildkitd. buildkitd/registry can stay
+      # up; with this backend nothing talks to them.
+      ENVBUILD_BUILDER_BACKEND: kaniko
+      ENVBUILD_KANIKO_NAMESPACE: default
+      ENVBUILD_KANIKO_KUBECONFIG: /home/node/.kube/config
+      ENVBUILD_REGISTRY_PUSH: docker.io/mismplatform
+      ENVBUILD_REGISTRY_PULL: ""
+      ENVBUILD_REGISTRY_INSECURE: "false"
+      ENVBUILD_REGISTRY_FLAT: "true"
+    volumes:
+      # Read-only. Kaniko itself reads its push creds from the in-cluster
+      # Secret (envbuild-registry-auth), not from this file -- this one is for
+      # the verification-side `docker pull` only.
+      - ../benchmark-envagent/.secrets/dockerhub-config.json:/home/node/.docker/config.json:ro
+      # AKS cluster mism-test (eastus), namespace default.
+      - ../../../kubeconfig/kubeconfig-az-mism-dev:/home/node/.kube/config:ro

@@ -197,24 +197,38 @@ def _parse_ci(root: Path) -> list[dict]:
     return out
 
 
-def _local_modules(root: Path) -> list[str]:
-    """Top-level importable names the repo itself defines.
+def _local_modules(root: Path) -> dict[str, tuple[str, bool]]:
+    """Top-level importable names the repo itself defines, mapped to
+    (containing directory relative to repo root -- "" means root itself, is a
+    real package).
 
     This is what stops the loop from "fixing" an IMPORT_PATH_ERROR by installing
-    a same-named package off PyPI (see classify.module_not_found).
+    a same-named package off PyPI (see classify.module_not_found) -- and, since
+    it now records *where* a module lives and not just *that* it exists, what
+    lets a mount-path repair be computed instead of guessed one repo at a time
+    (see driver.draft_spec). A flat layout (the module directly under root) and
+    a `src/` layout need different fixes; this is the one scan that knows which.
+
+    The package flag matters because only a package is something an entry file
+    can be *nested inside of* -- a bare top-level script never needs its own
+    directory added to the path on its behalf, it's already wherever it is.
     """
-    mods = set()
-    for base in (root, root / "src"):
+    mods: dict[str, tuple[str, bool]] = {}
+    for rel in ("", "src"):
+        base = root / rel if rel else root
         if not base.is_dir():
             continue
         for child in base.iterdir():
             if child.name in IGNORE_DIRS or child.name.startswith("."):
                 continue
+            name, is_pkg = None, False
             if child.is_dir() and (child / "__init__.py").exists():
-                mods.add(child.name)
+                name, is_pkg = child.name, True
             elif child.suffix == ".py" and child.stem != "setup":
-                mods.add(child.stem)
-    return sorted(mods)
+                name, is_pkg = child.stem, False
+            if name and name not in mods:      # first hit wins: root before src/
+                mods[name] = (rel, is_pkg)
+    return mods
 
 
 def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
@@ -225,6 +239,7 @@ def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
         files.append(str(rel))
         total += size
 
+    local_mods = _local_modules(root)
     ev: dict = {
         "root": str(root),
         "file_count": len(files),
@@ -234,7 +249,8 @@ def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
         "top_level": sorted({f.split("/")[0] for f in files})[:80],
         "markers": {m: m for m in MARKERS if (root / m).exists()},
         "languages": {},
-        "local_modules": _local_modules(root),
+        "local_modules": sorted(local_mods),
+        "local_module_paths": {n: rel for n, (rel, is_pkg) in local_mods.items() if is_pkg},
         "python": {}, "r": {}, "julia": {}, "conda": {},
         "system_hints": {"apt": [], "from_dockerfile": [], "from_ci": []},
         "ci": _parse_ci(root),

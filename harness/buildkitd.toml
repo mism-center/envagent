@@ -5,3 +5,12 @@ debug = false
 [registry."registry:5000"]
   http = true
   insecure = true
+
+# DIAGNOSTIC: build steps' auto-detected resolv.conf falls back to BuildKit's
+# hardcoded public defaults (8.8.8.8/8.8.4.4), which this network's firewall
+# blocks -- confirmed via a direct buildctl diagnostic build. The address that
+# actually works (confirmed via docker exec into this container) is Docker
+# Desktop's own internal DNS proxy. Testing whether pointing build steps at it
+# directly fixes real installs.
+[dns]
+  nameservers = ["192.168.65.7"]

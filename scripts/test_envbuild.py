@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -27,6 +28,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import baseselect                                     # noqa: E402
 import classify                                       # noqa: E402
+import driver                                         # noqa: E402
 import evidence                                       # noqa: E402
 import ladder                                         # noqa: E402
 import normalize                                      # noqa: E402
@@ -146,6 +148,37 @@ def _render_r_destdir():
     text = render(spec(pkg_manager="renv", pkg_specs=["deSolve"])).text
     assert 'destdir="/root/.cache/R"' in text
     assert "target=/root/.cache/R" in text
+
+
+@check("envspec: a malformed agent-supplied base_digest is rejected, not built")
+def _spec_digest_guard():
+    good = spec().to_dict()
+    assert EnvSpec.from_dict(good).base_digest == good["base_digest"]
+    for bad in ("sha256:" + "f" * 65, "sha256:" + "a" * 63, "sha256:nothex", "deadbeef"):
+        try:
+            EnvSpec.from_dict({**good, "base_digest": bad})
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted malformed digest {bad!r}")
+    # empty stays legal: that is what makes the driver resolve it from base_image
+    assert EnvSpec.from_dict({**good, "base_digest": ""}).base_digest == ""
+
+
+@check("renderer: emits no BuildKit-only syntax Kaniko silently mis-executes")
+def _render_kaniko_portable():
+    # Both halves of the mbmm regression found on the AKS/Kaniko benchmark pass.
+    # 1. Heredoc RUN: Kaniko runs the delimiter as the command and the step
+    #    no-ops, so every pre/post_install repair silently did nothing.
+    # 2. Cache-mount target: Kaniko ignores --mount and never creates the
+    #    directory, so R's destdir= is handed a path that does not exist.
+    text = render(spec(pkg_manager="renv", pkg_specs=["deSolve"],
+                       pre_install=["mkdir -p /root/.cache/R"],
+                       post_install=["echo done"])).text
+    assert "<<'ENVBUILD'" not in text and "ENVBUILD" not in text, text
+    assert "RUN set -eux \\\n && mkdir -p /root/.cache/R" in text, text
+    # the cache target is created before anything is told to write into it
+    run = next(b for b in text.split("\nRUN ") if "target=/root/.cache/R" in b)
+    assert run.index("mkdir -p /root/.cache/R") < run.index("destdir="), run
 
 
 @check("renderer: deterministic and hash is text-independent")
@@ -408,6 +441,31 @@ def _e_scan():
     assert ev["languages"].get("python", 0) >= 2
 
 
+@check("evidence: local_module_paths knows src/ from flat layout")
+def _e_local_module_paths():
+    # import_path_error is a src/ layout fixture; installed_mode is flat
+    # (the package sits directly at repo root). Same fact _local_modules always
+    # computed to find the name -- now it survives instead of being thrown away,
+    # which is what lets a mount-path repair be computed instead of guessed
+    # (see the tumor-tcell / vivarium-chemotaxis IMPORT_PATH_ERROR jobs).
+    src_ev = evidence.scan(FIXTURES / "import_path_error")
+    assert src_ev["local_module_paths"]["mypkg"] == "src", src_ev["local_module_paths"]
+    flat_ev = evidence.scan(FIXTURES / "installed_mode")
+    assert flat_ev["local_module_paths"]["mypkg"] == "", flat_ev["local_module_paths"]
+
+
+@check("draft_spec: mount.extra_path is seeded from local_module_paths, not guessed later")
+def _d_draft_spec_mount():
+    digest = "sha256:" + "a" * 64
+    src_ev = evidence.scan(FIXTURES / "import_path_error")
+    src_spec = driver.draft_spec(src_ev, {}, baseselect.select(src_ev), digest, "v0.24.0")
+    assert src_spec.mount.extra_path == ("/model/src",), src_spec.mount.extra_path
+
+    flat_ev = evidence.scan(FIXTURES / "installed_mode")
+    flat_spec = driver.draft_spec(flat_ev, {}, baseselect.select(flat_ev), digest, "v0.24.0")
+    assert flat_spec.mount.extra_path == ("/model",), flat_spec.mount.extra_path
+
+
 @check("evidence: install_mode guessed from compiled-extension evidence")
 def _e_mode():
     assert baseselect.guess_install_mode(evidence.scan(FIXTURES / "installed_mode"))[0] == "installed"
@@ -547,6 +605,26 @@ def _l_r_case():
         ["sklearn", "yaml"]
 
 
+@check("ladder: verify_timeout_s reaches every rung, not just L3")
+def _l_timeout_reaches_all_rungs():
+    # L1 and L2 used to hardcode 180s, so raising the budget moved L3 alone and
+    # an L1 timeout could not be configured away at all. Record every timeout
+    # the ladder hands the verifier, and assert the budget is what arrives.
+    seen = []
+
+    class _Recorder:
+        def run(self, _image, _code, _cmd, _mount, timeout_s, **_kw):
+            seen.append(timeout_s)
+            return verifier.RunResult(True, 0, "ok", "")
+
+        def outputs_listing(self):
+            return []
+
+    ladder.climb(_Recorder(), "img@sha256:" + "a" * 64, "code-vol", spec(),
+                 {"kind": "file", "value": "run.py"}, ["python", "run.py"], 451)
+    assert seen == [451, 451, 451], seen
+
+
 @check("ladder: rung ordering is what best-so-far rollback compares")
 def _l_rungs():
     assert ladder.rung_index("L3") > ladder.rung_index("L1") > ladder.rung_index("L0")
@@ -576,6 +654,80 @@ def _i_builder():
         raise AssertionError("unreachable builder did not raise")
     except InfraError as exc:
         assert "compose.host.yaml" in str(exc)      # names the actual fix
+
+
+@check("builder: nested registry (registry:2/GHCR/ECR) keeps job id in the path")
+def _b_nested_registry():
+    b = LocalBuildKitBuilder("job-abc", "tcp://x:1", "registry:5000", "v0.24.0")
+    b.attempt = 3
+    assert b._image_name() == "registry:5000/envbuild/job-abc:a3"
+    assert b._cache_ref(spec()) == "registry:5000/envbuild-cache/python-3.11-slim"
+
+
+@check("builder: flat registry (Docker Hub) folds job id into the tag")
+def _b_flat_registry():
+    b = LocalBuildKitBuilder("job-abc", "tcp://x:1", "docker.io/mismplatform",
+                             "v0.24.0", flat_registry=True)
+    b.attempt = 3
+    assert b._image_name() == "docker.io/mismplatform/envbuild:job-abc-a3"
+    assert b._cache_ref(spec()) == "docker.io/mismplatform/envbuild-cache:python-3.11-slim"
+
+
+@check("k8s_builder: naming matches LocalBuildKitBuilder's nested/flat shape")
+def _k8s_naming():
+    import k8s_builder
+    b = k8s_builder.K8sBuilder("job-abc", "default", "registry:5000")
+    b.attempt = 3
+    assert b._image_name() == "registry:5000/envbuild/job-abc:a3"
+
+    b2 = k8s_builder.K8sBuilder("job-abc", "default", "docker.io/mismplatform", flat_registry=True)
+    b2.attempt = 3
+    assert b2._image_name() == "docker.io/mismplatform/envbuild:job-abc-a3"
+
+
+@check("k8s_builder: pod name is a valid, unique k8s object name")
+def _k8s_pod_name():
+    import k8s_builder
+    b = k8s_builder.K8sBuilder("job-2026-09-14-a10a", "default", "registry:5000")
+    b.attempt = 2
+    name = b._pod_name()
+    assert len(name) <= 63, name
+    assert re.match(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", name), name
+    assert name != b._pod_name()          # two calls, two different names
+
+
+@check("k8s_builder: a Kaniko log line maps back to the EnvSpec field")
+def _k8s_step_match():
+    import k8s_builder
+    from envspec import render
+    # Real captured Kaniko output shape (v1.23.2): ANSI-colored INFO line
+    # echoing the rendered instruction verbatim, no "Step N/M" header.
+    rendered = render(spec())
+    pkg_step = rendered.steps[3]
+    assert pkg_step.kind == "pkg", pkg_step
+    # Kaniko flattens a multi-line rendered instruction (RUN --mount=...\ ...)
+    # onto one INFO line, same as the real captured output did.
+    flattened = " ".join(pkg_step.instruction.splitlines())
+    logs = "\n".join([
+        "\x1b[36mINFO\x1b[0m[0001] Retrieving image manifest python:3.11-slim",
+        f"\x1b[36mINFO\x1b[0m[0014] {flattened}",
+        "ERROR: Could not find a version that satisfies the requirement",
+        "error building image: error building stage: failed to execute command",
+    ])
+    step = k8s_builder._match_kaniko_step(logs, rendered.steps)
+    assert step is not None and step.index == pkg_step.index, step
+
+
+@check("config: ENVBUILD_REGISTRY_PULL='' clears the default, not just unset")
+def _cfg_empty_override():
+    import os
+    import driver
+    os.environ["ENVBUILD_REGISTRY_PULL"] = ""
+    try:
+        cfg = driver.load_config(None)
+        assert cfg.get("verifier", "registry_pull") == ""
+    finally:
+        del os.environ["ENVBUILD_REGISTRY_PULL"]
 
 
 @check("infra: InfraError is not a classifiable failure")

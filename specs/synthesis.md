@@ -74,9 +74,13 @@ anything that plots (there is no display in a verification container).
 `PYTHONUNBUFFERED=1` if you want usable L3 logs. Do not set `PYTHONPATH` here —
 use `mount.extra_path`, which renders into the right variable per language.
 
-**`mount`** — leave the defaults alone unless the annotation says otherwise. For
-a `src/` layout, set `extra_path: ["/model/src"]` up front rather than waiting
-for the L2 failure.
+**`mount`** — `draft_spec` already seeds `extra_path` from every local package
+`evidence.local_module_paths` found (root-level and `src/`-layout both), so the
+common case arrives pre-fixed; leave it alone unless you have stronger
+evidence. It only knows about a package directly under repo root or under
+`src/` — if the entry point needs some other container directory (a `lib/`
+convention, a nested namespace package, a monorepo subpackage), add it
+yourself rather than waiting for the L2 failure to rediscover it.
 
 **`entrypoint`** — record the annotation's command. It is *not* baked into the
 image in mounted mode; it is supplied at run time. Recording it is what lets the

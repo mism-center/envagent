@@ -57,6 +57,7 @@ import record                                        # noqa: E402
 from builder import LocalBuildKitBuilder             # noqa: E402
 from errors import InfraError                        # noqa: E402
 from envspec import EnvSpec, MountContract, render   # noqa: E402
+from k8s_builder import K8sBuilder                    # noqa: E402
 from verifier import LocalDockerVerifier             # noqa: E402
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -68,11 +69,18 @@ def load_config(path: str | None) -> configparser.ConfigParser:
     that differ between the compose stack and the cluster."""
     cfg = configparser.ConfigParser()
     cfg.read_dict({
-        "builder": {"buildkit_host": "tcp://buildkitd:1234",
+        "builder": {"backend": "local",
+                    "buildkit_host": "tcp://buildkitd:1234",
                     "buildkit_version": "v0.24.0",
                     "registry_push": "registry:5000",
                     "insecure_registry": "true",
+                    "flat_registry": "false",
                     "prune_on_cleanup": "true"},
+        "kaniko": {"namespace": "default",
+                   "kaniko_image": "gcr.io/kaniko-project/executor:v1.23.2",
+                   "helper_image": "busybox:1.36",
+                   "docker_config_secret": "envbuild-registry-auth",
+                   "kubeconfig": ""},
         "verifier": {"registry_pull": "localhost:5000",
                      "helper_image": "busybox:1.36",
                      "memory": ""},
@@ -84,12 +92,21 @@ def load_config(path: str | None) -> configparser.ConfigParser:
     })
     cfg.read([str(SKILL_DIR / "config.ini")] + ([path] if path else []))
     for env, (sec, key) in {
+        "ENVBUILD_BUILDER_BACKEND": ("builder", "backend"),
         "ENVBUILD_BUILDKIT_HOST": ("builder", "buildkit_host"),
         "ENVBUILD_REGISTRY_PUSH": ("builder", "registry_push"),
+        # Deliberately membership, not truthiness: a real external registry
+        # (Docker Hub) is one single, directly-pullable target, so the pull
+        # side needs to be an empty override, not just "unset" -- which
+        # requires the empty string itself to win over the default.
         "ENVBUILD_REGISTRY_PULL": ("verifier", "registry_pull"),
+        "ENVBUILD_REGISTRY_INSECURE": ("builder", "insecure_registry"),
+        "ENVBUILD_REGISTRY_FLAT": ("builder", "flat_registry"),
+        "ENVBUILD_KANIKO_NAMESPACE": ("kaniko", "namespace"),
+        "ENVBUILD_KANIKO_KUBECONFIG": ("kaniko", "kubeconfig"),
         "ENVBUILD_OUTPUTS": ("paths", "outputs"),
     }.items():
-        if os.environ.get(env):
+        if env in os.environ:
             cfg.set(sec, key, os.environ[env])
     return cfg
 
@@ -170,15 +187,50 @@ def _die_infra(cfg, state, exc: Exception) -> None:
         note="No attempt row written: this is a deployment fault, not a model failure.")
 
 
-def make_builder(cfg, state) -> LocalBuildKitBuilder:
-    b = LocalBuildKitBuilder(
-        job_id=state["job_id"],
-        addr=cfg.get("builder", "buildkit_host"),
-        registry=cfg.get("builder", "registry_push"),
-        builder_version=cfg.get("builder", "buildkit_version"),
-        insecure_registry=cfg.getboolean("builder", "insecure_registry"),
-        prune_on_cleanup=cfg.getboolean("builder", "prune_on_cleanup"),
-    )
+def builder_id(cfg) -> str:
+    """What actually built the image, for the attempt record.
+
+    Every row used to be stamped with `[builder] buildkit_version` regardless of
+    backend, so a Kaniko build was recorded as `v0.24.0` -- a BuildKit version
+    that never touched it. The whole point of the corpus is that records are
+    comparable across runs; a field naming the wrong build agent makes two
+    incomparable passes look like one.
+    """
+    if cfg.get("builder", "backend") == "kaniko":
+        return "kaniko " + cfg.get("kaniko", "kaniko_image").rsplit(":", 1)[-1]
+    return cfg.get("builder", "buildkit_version")
+
+
+def make_builder(cfg, state):
+    """Which `Builder` to construct. "kaniko" exists for clusters whose
+    admission policy blocks BuildKit outright (see k8s_builder.py's module
+    docstring) -- same protocol either way, so nothing downstream branches
+    on this."""
+    backend = cfg.get("builder", "backend")
+    if backend == "kaniko":
+        b = K8sBuilder(
+            job_id=state["job_id"],
+            namespace=cfg.get("kaniko", "namespace"),
+            registry=cfg.get("builder", "registry_push"),
+            kaniko_image=cfg.get("kaniko", "kaniko_image"),
+            helper_image=cfg.get("kaniko", "helper_image"),
+            docker_config_secret=cfg.get("kaniko", "docker_config_secret"),
+            insecure_registry=cfg.getboolean("builder", "insecure_registry"),
+            flat_registry=cfg.getboolean("builder", "flat_registry"),
+            kubeconfig=cfg.get("kaniko", "kubeconfig") or None,
+        )
+    elif backend == "local":
+        b = LocalBuildKitBuilder(
+            job_id=state["job_id"],
+            addr=cfg.get("builder", "buildkit_host"),
+            registry=cfg.get("builder", "registry_push"),
+            builder_version=builder_id(cfg),
+            insecure_registry=cfg.getboolean("builder", "insecure_registry"),
+            prune_on_cleanup=cfg.getboolean("builder", "prune_on_cleanup"),
+            flat_registry=cfg.getboolean("builder", "flat_registry"),
+        )
+    else:
+        raise InfraError(f"unknown builder backend {backend!r} (expected local|kaniko)")
     b.attempt = state["attempt"]          # keep image tags aligned with attempts
     return b
 
@@ -205,6 +257,22 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
     if choice.pkg_manager == "mamba":
         deps = list((ev.get("conda") or {}).get("deps") or deps)
     apt = sorted(set(list(ann.get("system_deps") or []) + list(ev["system_hints"]["apt"])))
+    # A local module living directly at repo root or under src/ needs that
+    # directory on the import path -- the entry point's own file is often
+    # nested a few levels below it, so relying on "the entry file's own
+    # directory" (ladder.py's L2 probe) is not enough. Evidence already knows
+    # which of the two it is (evidence._local_modules); seed it here instead of
+    # waiting for the L2 failure + a repair attempt to rediscover the same fact
+    # per repo.
+    mount = MountContract()
+    local_dirs = sorted({d for d in (ev.get("local_module_paths") or {}).values()})
+    if local_dirs:
+        mount = MountContract(**{
+            **mount.to_dict(),
+            "extra_path": tuple(
+                mount.code_path if not d else f"{mount.code_path}/{d}" for d in local_dirs
+            ),
+        })
     return EnvSpec(
         base_image=choice.base_image,
         base_digest=digest,
@@ -213,7 +281,7 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
         apt_packages=apt,
         pkg_specs=deps,
         env_vars={},
-        mount=MountContract(),
+        mount=mount,
         entrypoint=[],
         builder_version=builder_version,
     )
@@ -241,7 +309,7 @@ def cmd_init(args, cfg) -> None:
     except RuntimeError as exc:
         die(str(exc), code=4)
 
-    spec = draft_spec(ev, ann, choice, digest, cfg.get("builder", "buildkit_version"))
+    spec = draft_spec(ev, ann, choice, digest, builder_id(cfg))
     entry = ladder_mod.entry_from_command(
         (ann.get("entry_points") or [{}])[0].get("command") or "")
 
@@ -311,7 +379,7 @@ def cmd_spec(args, cfg) -> None:
             spec.base_digest = baseselect.resolve_digest(spec.base_image)
         except RuntimeError as exc:
             die(str(exc), code=4)
-    spec.builder_version = cfg.get("builder", "buildkit_version")
+    spec.builder_version = builder_id(cfg)
     old = render(EnvSpec.from_dict(state["spec"])).text
     state["spec"] = spec.to_dict()
     state["patched_since_attempt"] = True

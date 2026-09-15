@@ -59,7 +59,14 @@ if [ -z "$DOCKER_GID" ]; then
 fi
 
 mkdir -p outputs
-docker compose up -d buildkitd registry
+# Only the local backend needs them. Under kaniko the build runs in-cluster and
+# pushes to a real registry, so starting these leaves two idle containers in
+# `docker ps` that look like the thing doing the building.
+if [ "${ENVBUILD_BUILDER_BACKEND:-local}" = "local" ]; then
+  docker compose up -d buildkitd registry
+else
+  echo "$0: backend=${ENVBUILD_BUILDER_BACKEND} -- skipping local buildkitd/registry." >&2
+fi
 docker compose run --rm \
   -v "$REPO_HOST:/workspace/repo:ro" \
   agent

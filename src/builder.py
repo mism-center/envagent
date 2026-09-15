@@ -153,13 +153,18 @@ class LocalBuildKitBuilder:
 
     def __init__(self, job_id: str, addr: str, registry: str, builder_version: str,
                  insecure_registry: bool = True, prune_on_cleanup: bool = True,
-                 workdir: str | Path = "/tmp/envbuild"):
+                 flat_registry: bool = False, workdir: str | Path = "/tmp/envbuild"):
         self.job_id = job_id
         self.addr = addr
         self.registry = registry.rstrip("/")
         self.builder_version = builder_version
         self.insecure = insecure_registry
         self.prune_on_cleanup = prune_on_cleanup
+        # Docker Hub (and similar) allow exactly namespace/repository -- no
+        # deeper nesting -- unlike the local registry:2 / GHCR / ECR, which all
+        # tolerate an arbitrary path. A flat registry needs job identity folded
+        # into the tag instead of the path.
+        self.flat_registry = flat_registry
         self.workdir = Path(workdir) / job_id
         self.attempt = 0
 
@@ -187,11 +192,19 @@ class LocalBuildKitBuilder:
         return out.stdout.strip().splitlines()[-1] if out.stdout.strip() else "ok"
 
     # -- internals -------------------------------------------------------
+    def _image_repo(self) -> str:
+        if self.flat_registry:
+            return f"{self.registry}/envbuild"
+        return f"{self.registry}/envbuild/{self.job_id}"
+
     def _image_name(self) -> str:
-        return f"{self.registry}/envbuild/{self.job_id}:a{self.attempt}"
+        tag = f"{self.job_id}-a{self.attempt}" if self.flat_registry else f"a{self.attempt}"
+        return f"{self._image_repo()}:{tag}"
 
     def _cache_ref(self, spec: EnvSpec) -> str:
         # Keyed on the base image, so every model sharing a base shares the cache.
+        if self.flat_registry:
+            return f"{self.registry}/envbuild-cache:{spec.image_ref_base}"
         return f"{self.registry}/envbuild-cache/{spec.image_ref_base}"
 
     # -- Builder protocol ------------------------------------------------
@@ -256,7 +269,7 @@ class LocalBuildKitBuilder:
                     digest = json.loads(meta.read_text()).get("containerimage.digest")
                 except (OSError, json.JSONDecodeError):
                     digest = None
-            ref = f"{self.registry}/envbuild/{self.job_id}@{digest}" if digest else name
+            ref = f"{self._image_repo()}@{digest}" if digest else name
             # image_bytes is filled by the verifier after it pulls: measuring it
             # here would mean a second registry round-trip that plain HTTP breaks.
             return BuildResult(ok=True, image_ref=ref, image_digest=digest,

@@ -45,7 +45,7 @@ services:
     build:
       context: .
       dockerfile: harness/Dockerfile
-    image: mismplatform/envbuild-pi:dev
+    image: mismplatform/pi-envagent:develop
     depends_on: [buildkitd, registry]
     environment:
       ENVBUILD_BUILDKIT_HOST: tcp://buildkitd:1234
