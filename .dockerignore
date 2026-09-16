@@ -1,0 +1,10 @@
+# The harness image COPYs SKILL.md, config.ini, specs/, src/, scripts/,
+# fixtures/ and harness/. Everything listed here is upload cost on every
+# rebuild -- outputs/ is the one that grows without bound as a corpus run
+# proceeds. Keep this list conservative: excluding something the Dockerfile
+# COPYs fails the build at that line, not here.
+.git
+.github
+outputs
+runs
+**/__pycache__

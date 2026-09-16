@@ -42,7 +42,11 @@ attempt record.
 - `PIN_PKG` — pin to a version that predates the break, not to "latest known
   good". For an `ABI_MISMATCH` against numpy 2, `numpy<2` on the *dependent* is
   usually better than pinning numpy itself.
-- `FIX_MOUNT_CONTRACT` — for `IMPORT_PATH_ERROR` in a `src/` layout, the answer
-  is almost always `extra_path=/model/src`.
+- `FIX_MOUNT_CONTRACT` — for `IMPORT_PATH_ERROR`, `draft_spec` already seeds
+  `extra_path` from every root-level or `src/`-layout package the evidence scan
+  found, so you should rarely see this at all for those two layouts. If you do
+  (a repair chain that swapped entry points, a layout the scan doesn't cover),
+  the fix is still the same shape: the containing directory of whichever local
+  package the traceback names, relative to `/model`.
 - `ESCALATE` — only for `TIMEOUT` and `RUNTIME_ERROR` after a real repair was
   tried. It is not a way to skip thinking.

@@ -3,27 +3,23 @@
 #   docker build -t envbuild-pi -f harness/Dockerfile .
 FROM node:24-bookworm-slim
 
-# Runtime tools Pi's built-in tools expect, plus tar (code staging) and git
-# (code_revision -- half of the approval unit).
+# Runtime tools Pi's built-in tools expect, plus git (code_revision -- half of
+# the approval unit). ca-certificates is load-bearing rather than incidental:
+# every call to the Kubernetes API and to the registry is HTTPS from Python.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep curl tar \
+  && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep curl \
   && rm -rf /var/lib/apt/lists/*
 
 # uv: required at runtime -- the skill runs `uv run src/driver.py`, which resolves
 # PyYAML and a managed Python via PEP 723 inline deps. Static binary, pinned.
 COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /usr/local/bin/
 
-# docker CLI + buildx plugin. Used ONLY for verification runs and digest
-# resolution against the host daemon -- the agent never builds through the socket.
-COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
-COPY --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/docker-buildx \
-     /usr/local/libexec/docker/cli-plugins/docker-buildx
-
-# buildctl, from the SAME buildkit version the daemon runs. Both are pinned for
-# the same reason: attempt records are only comparable across runs if the build
-# agent does not change underneath the corpus. Keep in step with
-# config.ini [builder] buildkit_version and compose.yaml.
-COPY --from=moby/buildkit:v0.24.0 /usr/bin/buildctl /usr/local/bin/buildctl
+# No docker, no buildx, no kubectl -- on purpose, and each for its own reason.
+# Builds are Kaniko pods and verification runs are pods, both created over the
+# Kubernetes REST API (src/k8s.py); base-image digests and image sizes are
+# registry GETs (src/registry.py). There is no daemon to talk to and no binary
+# worth shipping. An agent that cannot shell out to a cluster CLI is also one
+# fewer way for an LLM-driven loop to do something nobody asked for.
 
 # Install pi coding agent globally (still as root).
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
@@ -58,8 +54,9 @@ RUN mkdir -p /opt/uv/python /opt/uv/cache \
   && chmod -R 0777 /opt/uv
 
 # Non-root. Reuses node:24's own uid-1000 `node` user rather than adding a
-# second one. Access to /var/run/docker.sock comes from compose's `group_add`,
-# not from running as root.
+# second one. Nothing here needs a privileged socket or a supplementary group
+# any more: the only thing this process talks to is the API server, as the
+# ServiceAccount the pod was given.
 RUN mkdir -p /workspace/outputs \
   && chown -R node:node /workspace /opt/pi /opt/skills
 USER node

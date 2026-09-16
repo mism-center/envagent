@@ -74,6 +74,9 @@ _HEADER_DIR_APT = {
 }
 
 # Import name -> PyPI distribution, for the cases where they differ.
+# Also feeds ladder.py's L1 probe (reversed: dist -> import name), so an entry
+# here fixes both "what do I pip install for this missing import" and "what do
+# I actually try to import for this installed distribution".
 MODULE_PYPI = {
     "sklearn": "scikit-learn", "cv2": "opencv-python-headless", "yaml": "PyYAML",
     "PIL": "Pillow", "Bio": "biopython", "skimage": "scikit-image",
@@ -81,6 +84,10 @@ MODULE_PYPI = {
     "dateutil": "python-dateutil", "attr": "attrs", "pkg_resources": "setuptools",
     "google": "protobuf", "Crypto": "pycryptodome", "usb": "pyusb",
     "OpenSSL": "pyOpenSSL", "zmq": "pyzmq", "cairo": "pycairo",
+    # vivarium-core's importable package is "vivarium", not "vivarium_core" --
+    # the naive dist.replace("-", "_") fallback guesses wrong and L1 falsely
+    # reports the (installed) distribution as a missing module.
+    "vivarium": "vivarium-core",
 }
 
 
@@ -122,7 +129,8 @@ def _rules():
                               arg=pkg, evidence=m.group(0))
 
     def module_not_found(m, ctx):
-        mod = m.group(1).split(".")[0]
+        full = m.group(1)
+        mod = full.split(".")[0]
         # Rung-aware: the same text means different things at L1 and L2. At L1 no
         # code is mounted, so it can only be a missing dependency. At L2+ a module
         # the repo itself defines means the mount/PYTHONPATH is wrong -- installing
@@ -130,6 +138,14 @@ def _rules():
         if ctx.get("rung") in ("L2", "L3") and mod in ctx.get("local_modules", ()):
             return Classification("IMPORT_PATH_ERROR", action="FIX_MOUNT_CONTRACT",
                                   arg=None, evidence=m.group(0))
+        if "." in full:
+            # Dotted path ("pint.quantity"): Python only reports the submodule
+            # this way when the top-level package already imported fine -- the
+            # installed version just lacks that internal module. That's an API
+            # break, not a missing package; re-adding the top-level package is a
+            # no-op and gets the repair loop stuck retrying it forever.
+            return Classification("ABI_MISMATCH", action="PIN_PKG",
+                                  arg=MODULE_PYPI.get(mod, mod), evidence=m.group(0))
         return Classification("MISSING_DEPENDENCY", action="ADD_PKG",
                               arg=MODULE_PYPI.get(mod, mod), evidence=m.group(0))
 

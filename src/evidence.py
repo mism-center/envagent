@@ -1,5 +1,4 @@
-"""Non-LLM repo scan -> evidence.json, plus the annotation-YAML reader and the
-context/code tar builder.
+"""Non-LLM repo scan -> evidence.json, plus the annotation-YAML reader.
 
 Everything here is deterministic: no model call, no network. The output is the
 sole input to base selection and the main input to spec synthesis, so it needs
@@ -12,11 +11,9 @@ in most repos.
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import re
-import tarfile
 import tomllib
 from pathlib import Path
 
@@ -33,8 +30,8 @@ MARKERS = [
     "Snakefile", "nextflow.config", "manifest.xml",
 ]
 
-# Never tarred: VCS metadata, caches, virtualenvs, and the result dirs that make
-# a 3 MB repo into a 900 MB context.
+# Never scanned: VCS metadata, caches, virtualenvs, and the result dirs that
+# make a 3 MB repo look like a 900 MB one.
 IGNORE_DIRS = {
     ".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache",
     ".ruff_cache", ".tox", ".venv", "venv", "env", "node_modules", ".ipynb_checkpoints",
@@ -197,24 +194,38 @@ def _parse_ci(root: Path) -> list[dict]:
     return out
 
 
-def _local_modules(root: Path) -> list[str]:
-    """Top-level importable names the repo itself defines.
+def _local_modules(root: Path) -> dict[str, tuple[str, bool]]:
+    """Top-level importable names the repo itself defines, mapped to
+    (containing directory relative to repo root -- "" means root itself, is a
+    real package).
 
     This is what stops the loop from "fixing" an IMPORT_PATH_ERROR by installing
-    a same-named package off PyPI (see classify.module_not_found).
+    a same-named package off PyPI (see classify.module_not_found) -- and, since
+    it now records *where* a module lives and not just *that* it exists, what
+    lets a mount-path repair be computed instead of guessed one repo at a time
+    (see driver.draft_spec). A flat layout (the module directly under root) and
+    a `src/` layout need different fixes; this is the one scan that knows which.
+
+    The package flag matters because only a package is something an entry file
+    can be *nested inside of* -- a bare top-level script never needs its own
+    directory added to the path on its behalf, it's already wherever it is.
     """
-    mods = set()
-    for base in (root, root / "src"):
+    mods: dict[str, tuple[str, bool]] = {}
+    for rel in ("", "src"):
+        base = root / rel if rel else root
         if not base.is_dir():
             continue
         for child in base.iterdir():
             if child.name in IGNORE_DIRS or child.name.startswith("."):
                 continue
+            name, is_pkg = None, False
             if child.is_dir() and (child / "__init__.py").exists():
-                mods.add(child.name)
+                name, is_pkg = child.name, True
             elif child.suffix == ".py" and child.stem != "setup":
-                mods.add(child.stem)
-    return sorted(mods)
+                name, is_pkg = child.stem, False
+            if name and name not in mods:      # first hit wins: root before src/
+                mods[name] = (rel, is_pkg)
+    return mods
 
 
 def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
@@ -225,6 +236,7 @@ def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
         files.append(str(rel))
         total += size
 
+    local_mods = _local_modules(root)
     ev: dict = {
         "root": str(root),
         "file_count": len(files),
@@ -234,7 +246,8 @@ def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
         "top_level": sorted({f.split("/")[0] for f in files})[:80],
         "markers": {m: m for m in MARKERS if (root / m).exists()},
         "languages": {},
-        "local_modules": _local_modules(root),
+        "local_modules": sorted(local_mods),
+        "local_module_paths": {n: rel for n, (rel, is_pkg) in local_mods.items() if is_pkg},
         "python": {}, "r": {}, "julia": {}, "conda": {},
         "system_hints": {"apt": [], "from_dockerfile": [], "from_ci": []},
         "ci": _parse_ci(root),
@@ -428,26 +441,6 @@ def read_annotation(path: str | Path) -> dict:
 
 
 # --------------------------------------------------------------------------
-def make_tar(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> bytes:
-    """Tar the repo (ignore list applied) for the build context and code volume.
-
-    Hard ceiling, because a repo carrying hundreds of MB of result data will
-    otherwise silently make every attempt slow and every cache useless.
-    """
-    root = Path(root).resolve()
-    buf = io.BytesIO()
-    total = 0
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        for rel, size in sorted(_walk(root)):
-            total += size
-            if total > max_bytes:
-                raise ValueError(
-                    f"context exceeds {max_bytes} bytes at {rel}; "
-                    "extend evidence.IGNORE_DIRS or raise budgets.max_context_bytes")
-            tar.add(root / rel, arcname=str(rel), recursive=False)
-    return buf.getvalue()
-
-
 if __name__ == "__main__":          # `python evidence.py <repo>` -> evidence.json
     import sys
     print(json.dumps(scan(sys.argv[1]), indent=2))

@@ -8,7 +8,7 @@ neither should have to import the other just to name a shared failure mode.
 class InfraError(RuntimeError):
     """The build/verify substrate is unavailable.
 
-    Daemon unreachable, socket permission denied, buildkitd not listening. This
+    Daemon unreachable, socket permission denied, no cluster to build in. This
     is a property of the *deployment*, never of the model -- so it must never
     become an attempt row. A corpus row saying `UNKNOWN` when the real answer was
     "the agent could not reach dockerd" is a row that teaches the memory layer a

@@ -1,0 +1,111 @@
+# One envbuild run, as a Job. `run.sh` fills the placeholders and applies it;
+# eventually the execution platform will do the same thing from model discovery.
+# Keep it at pod level -- there is no queue and no long-lived service, because
+# Phase 0 has no queue to consume.
+#
+# Placeholders `run.sh` substitutes: __JOB__ __MODEL_ID__ __MODEL_REPO__
+# __ANNOTATION__ __MODELS_PVC__ __AGENT_IMAGE__
+#
+# Model artifacts on `irods-pvc` are laid out <model_id>/<version>/<files>, so
+# __MODEL_REPO__ is /models/<model_id>/<version> and the verify pod mounts that
+# subPath read-only at the contract's code_path.
+#
+# Provider credentials come from a Secret created out of band, never from here.
+# The two Azure keys are the whole requirement -- entrypoint.sh infers both the
+# provider and the model from whichever credential is present:
+#   kubectl -n default create secret generic envbuild-llm \
+#       --from-literal=AZURE_OPENAI_API_KEY=... \
+#       --from-literal=AZURE_OPENAI_BASE_URL=...
+#   (or a single --from-literal=ANTHROPIC_API_KEY=...)
+#
+# Anything you would want to VARY across a benchmark -- AI_MODEL, AI_PROVIDER,
+# MAX_ATTEMPTS, PROMPT, MISM_GUID -- belongs in an optional ConfigMap instead,
+# so changing it needs no edit here and no new image:
+#   kubectl -n default create configmap envbuild-tuning \
+#       --from-literal=AI_MODEL=gpt-5.6-luna --from-literal=MAX_ATTEMPTS=3
+# Optional on purpose: absent, entrypoint.sh falls back to its own defaults.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: envbuild-__JOB__
+  namespace: default
+spec:
+  backoffLimit: 0          # a retry would write a second attempt row for one job
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: envbuild-agent
+        job-id: __JOB__
+    spec:
+      restartPolicy: Never
+      serviceAccountName: envbuild
+      containers:
+        - name: agent
+          image: __AGENT_IMAGE__
+          # Always, because the benchmark tag is mutable. Kubernetes defaults
+          # a non-:latest tag to IfNotPresent, so a node that already cached
+          # :k8s-test would keep running the OLD image after a re-push -- you
+          # fix something, re-run, and measure the thing you just replaced.
+          imagePullPolicy: Always
+          env:
+            - name: MODEL_ID
+              value: "__MODEL_ID__"
+            - name: MODEL_REPO
+              value: "__MODEL_REPO__"        # /models/<model_id>/<version>
+            - name: ANNOTATION
+              value: "__ANNOTATION__"
+            - name: ENVBUILD_OUTPUTS
+              value: /work/records
+            # Empty on purpose: both say "use the ServiceAccount this pod
+            # already has", overriding anything config.ini carries.
+            - name: ENVBUILD_K8S_TOKEN
+              value: ""
+            - name: ENVBUILD_KANIKO_KUBECONFIG
+              value: ""
+            - name: ENVBUILD_WORK_PVC
+              value: envbuild-work
+            - name: ENVBUILD_WORK_MOUNT
+              value: /work
+            - name: ENVBUILD_MODELS_PVC
+              value: "__MODELS_PVC__"
+            - name: ENVBUILD_MODELS_MOUNT
+              value: /models
+          envFrom:
+            # Tuning first, credentials second. envFrom applies in order, so a
+            # Secret always wins over a ConfigMap anyone with edit rights can
+            # change -- a tuning knob must never be able to swap a credential.
+            - configMapRef:
+                name: envbuild-tuning
+                optional: true
+            - secretRef:
+                name: envbuild-llm
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: models
+              mountPath: /models
+              readOnly: true
+            # Read-only, and only so the registry client can authenticate to
+            # read manifests. Kaniko gets its own copy; this one never pushes.
+            - name: docker-config
+              mountPath: /home/node/.docker
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: work
+          persistentVolumeClaim:
+            claimName: envbuild-work
+        - name: models
+          persistentVolumeClaim:
+            claimName: __MODELS_PVC__
+            readOnly: true
+        - name: docker-config
+          secret:
+            secretName: envbuild-registry-auth
+            items:
+              - key: .dockerconfigjson
+                path: config.json

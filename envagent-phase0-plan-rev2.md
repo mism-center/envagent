@@ -2,6 +2,12 @@
 
 An agent that turns a registered model into a verified execution environment, and tells you honestly when it can't.
 
+> **Historical.** This is the rev-2 design doc, kept for the reasoning behind
+> the loop. Where it says BuildKit/buildkitd/buildctl, the implementation now
+> builds with Kaniko in a Kubernetes cluster (`src/builder.py`); the `Builder`
+> protocol and everything downstream of it are unchanged. See `README.md` for
+> the current topology.
+
 ---
 
 ## 0. Scope

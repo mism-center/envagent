@@ -16,8 +16,10 @@ can proceed while the compose stack is still being sorted.
 
 from __future__ import annotations
 
-import base64
+import io
 import json
+import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -27,13 +29,17 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import baseselect                                     # noqa: E402
 import classify                                       # noqa: E402
+import driver                                         # noqa: E402
 import evidence                                       # noqa: E402
 import ladder                                         # noqa: E402
 import normalize                                      # noqa: E402
 import patch                                          # noqa: E402
 import record                                         # noqa: E402
 import verifier                                      # noqa: E402
-from builder import LocalBuildKitBuilder, map_vertex_to_step, parse_rawjson  # noqa: E402
+import builder                                       # noqa: E402
+import k8s                                           # noqa: E402
+import registry                                      # noqa: E402
+from builder import K8sBuilder, match_step            # noqa: E402
 from errors import InfraError                        # noqa: E402
 from envspec import EnvSpec, MountContract, render     # noqa: E402
 
@@ -55,6 +61,52 @@ def spec(**kw) -> EnvSpec:
             "pkg_specs": ["numpy<2"], "apt_packages": ["libxml2-dev"]}
     base.update(kw)
     return EnvSpec(**base)
+
+
+class FakeClient:                              # pylint: disable=unused-argument
+    """A cluster that records what it was asked to create and answers canned.
+
+    The whole Kubernetes surface is five calls, so faking it is five methods --
+    which is itself the argument for the surface being that small.
+    """
+
+    def __init__(self, namespace="envbuild", allow=True, exit_code=0, logs=""):
+        self.namespace = namespace
+        self.allow = allow
+        self.exit_code = exit_code
+        self.logs = logs
+        self.created: list[dict] = []
+        self.deleted: list[str] = []
+
+    def can_i(self, verb, resource):
+        return self.allow
+
+    def create_pod(self, manifest):
+        self.created.append(manifest)
+        return manifest
+
+    def delete_pod(self, name, grace_seconds=0):
+        self.deleted.append(name)
+
+    def pod_log(self, name, container, tail_bytes=200_000):
+        return self.logs
+
+    def wait_terminated(self, name, container, deadline, poll_s=2.0):
+        return self.exit_code, ""
+
+
+def mk_builder(job_id="job-abc", registry_push="registry:5000", client=None, **kw):
+    return K8sBuilder(job_id, client or FakeClient(), registry_push,
+                      work_pvc="envbuild-work", work_mount="/work", **kw)
+
+
+def mk_verifier(job_id="job-abc", client=None, **kw):
+    kw.setdefault("work_pvc", "envbuild-work")
+    kw.setdefault("work_mount", "/work")
+    kw.setdefault("models_pvc", "models")
+    kw.setdefault("models_mount", "/models")
+    kw.setdefault("code_ref", "/models/mbmm/1.0")
+    return verifier.K8sVerifier(job_id, client or FakeClient(), **kw)
 
 
 # ---------------------------------------------------------------- renderer
@@ -145,7 +197,42 @@ def _render_r_base():
 def _render_r_destdir():
     text = render(spec(pkg_manager="renv", pkg_specs=["deSolve"])).text
     assert 'destdir="/root/.cache/R"' in text
-    assert "target=/root/.cache/R" in text
+    assert "mkdir -p /root/.cache/R" in text
+
+
+@check("envspec: a malformed agent-supplied base_digest is rejected, not built")
+def _spec_digest_guard():
+    good = spec().to_dict()
+    assert EnvSpec.from_dict(good).base_digest == good["base_digest"]
+    for bad in ("sha256:" + "f" * 65, "sha256:" + "a" * 63, "sha256:nothex", "deadbeef"):
+        try:
+            EnvSpec.from_dict({**good, "base_digest": bad})
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted malformed digest {bad!r}")
+    # empty stays legal: that is what makes the driver resolve it from base_image
+    assert EnvSpec.from_dict({**good, "base_digest": ""}).base_digest == ""
+
+
+@check("renderer: emits no BuildKit-only syntax Kaniko silently mis-executes")
+def _render_kaniko_portable():
+    # Both halves of the mbmm regression found on the AKS/Kaniko benchmark pass,
+    # plus the two directives Kaniko reads as plain comments.
+    # 1. Heredoc RUN: Kaniko runs the delimiter as the command and the step
+    #    no-ops, so every pre/post_install repair silently did nothing.
+    # 2. Cache-mount target: Kaniko ignores --mount and never creates the
+    #    directory, so R's destdir= is handed a path that does not exist.
+    text = render(spec(pkg_manager="renv", pkg_specs=["deSolve"],
+                       apt_packages=["libxml2-dev"],
+                       pre_install=["mkdir -p /root/.cache/R"],
+                       post_install=["echo done"])).text
+    assert "<<'ENVBUILD'" not in text and "ENVBUILD" not in text, text
+    assert "--mount=" not in text, text          # BuildKit-only; Kaniko ignores it
+    assert "# syntax=" not in text, text         # selects a BuildKit frontend
+    assert "RUN set -eux \\\n && mkdir -p /root/.cache/R" in text, text
+    # the cache dir is created before anything is told to write into it
+    run = next(r for r in text.split("\nRUN ") if "destdir=" in r)
+    assert run.index("mkdir -p /root/.cache/R") < run.index("destdir="), run
 
 
 @check("renderer: deterministic and hash is text-independent")
@@ -303,6 +390,35 @@ def _c_build_mode():
     assert (c.failure_class, c.action, c.arg) == ("BUILD_MODE_MISMATCH", "SWITCH_INSTALL_MODE", "installed")
 
 
+@check("classify: dotted submodule miss is a version break, not a missing pkg")
+def _c_dotted_submodule():
+    # "pint.quantity" missing means pint itself imported fine -- the installed
+    # version just lacks that internal module. Re-adding pint is a no-op and
+    # gets the repair loop stuck (this is exactly what happened on the
+    # vivarium-chemotaxis benchmark job).
+    c = classify.classify("ModuleNotFoundError: No module named 'pint.quantity'", rung="L1")
+    assert (c.failure_class, c.action, c.arg) == ("ABI_MISMATCH", "PIN_PKG", "pint")
+
+
+@check("ladder: vivarium-core's import probe name is vivarium, not vivarium_core")
+def _c_vivarium_probe():
+    # Real bench failure: dist.replace("-", "_") guessed "vivarium_core", so L1
+    # reported the installed distribution as a missing module forever.
+    import ladder
+    s = spec(pkg_specs=["vivarium-core==0.0.34"])
+    assert ladder.import_names(s) == ["vivarium"]
+
+
+@check("ladder: opencv-python and ipython probe as cv2 / IPython")
+def _c_probe_aliases():
+    # Real bench failures: dist.replace("-", "_") guessed "opencv_python" and
+    # "ipython" (lowercase), both wrong -- L1 reported installed, working
+    # distributions as permanently missing.
+    import ladder
+    assert ladder.import_names(spec(pkg_specs=["opencv-python==4.9.0"])) == ["cv2"]
+    assert ladder.import_names(spec(pkg_specs=["ipython"])) == ["IPython"]
+
+
 @check("classify: the rest of the table fires on representative stderr")
 def _c_table():
     cases = {
@@ -379,6 +495,31 @@ def _e_scan():
     assert ev["languages"].get("python", 0) >= 2
 
 
+@check("evidence: local_module_paths knows src/ from flat layout")
+def _e_local_module_paths():
+    # import_path_error is a src/ layout fixture; installed_mode is flat
+    # (the package sits directly at repo root). Same fact _local_modules always
+    # computed to find the name -- now it survives instead of being thrown away,
+    # which is what lets a mount-path repair be computed instead of guessed
+    # (see the tumor-tcell / vivarium-chemotaxis IMPORT_PATH_ERROR jobs).
+    src_ev = evidence.scan(FIXTURES / "import_path_error")
+    assert src_ev["local_module_paths"]["mypkg"] == "src", src_ev["local_module_paths"]
+    flat_ev = evidence.scan(FIXTURES / "installed_mode")
+    assert flat_ev["local_module_paths"]["mypkg"] == "", flat_ev["local_module_paths"]
+
+
+@check("draft_spec: mount.extra_path is seeded from local_module_paths, not guessed later")
+def _d_draft_spec_mount():
+    digest = "sha256:" + "a" * 64
+    src_ev = evidence.scan(FIXTURES / "import_path_error")
+    src_spec = driver.draft_spec(src_ev, {}, baseselect.select(src_ev), digest, "v0.24.0")
+    assert src_spec.mount.extra_path == ("/model/src",), src_spec.mount.extra_path
+
+    flat_ev = evidence.scan(FIXTURES / "installed_mode")
+    flat_spec = driver.draft_spec(flat_ev, {}, baseselect.select(flat_ev), digest, "v0.24.0")
+    assert flat_spec.mount.extra_path == ("/model",), flat_spec.mount.extra_path
+
+
 @check("evidence: install_mode guessed from compiled-extension evidence")
 def _e_mode():
     assert baseselect.guess_install_mode(evidence.scan(FIXTURES / "installed_mode"))[0] == "installed"
@@ -428,16 +569,6 @@ def _e_annotation():
     assert ann["language"] == "python"
 
 
-@check("evidence: context tar respects its ceiling")
-def _e_tar():
-    assert len(evidence.make_tar(FIXTURES / "dep_conflict")) > 0
-    try:
-        evidence.make_tar(FIXTURES / "dep_conflict", max_bytes=10)
-        raise AssertionError("ceiling not enforced")
-    except ValueError:
-        pass
-
-
 @check("baseselect: the table picks the documented base per language")
 def _b_table():
     assert baseselect.select({"languages": {"python": 3}, "python": {}, "ci": [],
@@ -458,28 +589,17 @@ def _b_ci():
 
 
 # ---------------------------------------------------------------- builder / ladder
-@check("builder: vertex maps back to the EnvSpec field that produced it")
+@check("builder: a logged instruction maps back to the EnvSpec field that produced it")
 def _bd_map():
     steps = render(spec()).steps
-    apt = map_vertex_to_step("[2/6] RUN --mount=type=cache,target=/var/cache/apt,sharing=locked "
-                             "--mount=type=cache,target=/var/lib/apt/lists,sharing=locked "
-                             "rm -f /etc/apt/apt.conf.d/docker-clean && apt-get update", steps)
+    # Kaniko echoes the rendered instruction flattened onto one line.
+    apt = match_step("RUN apt-get update && apt-get install -y "
+                     "--no-install-recommends libxml2-dev", steps)
     assert (apt.kind, apt.field) == ("apt", "apt_packages")
-    pkg = map_vertex_to_step("[4/6] RUN --mount=type=cache,target=/root/.cache/pip "
-                             "pip install 'numpy<2'", steps)
+    pkg = match_step("RUN mkdir -p /root/.cache/pip && pip install 'numpy<2'", steps)
     assert (pkg.kind, pkg.field) == ("pkg", "pkg_specs")
-
-
-@check("builder: rawjson stream yields vertex errors and decoded logs")
-def _bd_rawjson():
-    line = json.dumps({"vertexes": [{"digest": "d1", "name": "[2/5] RUN apt-get",
-                                     "error": "exit code 100"}],
-                       "logs": [{"vertex": "d1",
-                                 "data": base64.b64encode(b"E: Unable to locate package foo").decode()}]})
-    vs, bad = parse_rawjson(line + "\nnot json\n")
-    assert not bad                        # non-JSON lines are skipped, not fatal
-    assert vs["d1"].error == "exit code 100"
-    assert "Unable to locate package" in "".join(vs["d1"].logs)
+    # Nothing close enough must not be forced onto some step anyway.
+    assert match_step("LABEL nothing=here", steps) is None
 
 
 @check("ladder: entry point derived from file, module and bare-script commands")
@@ -518,6 +638,26 @@ def _l_r_case():
         ["sklearn", "yaml"]
 
 
+@check("ladder: verify_timeout_s reaches every rung, not just L3")
+def _l_timeout_reaches_all_rungs():
+    # L1 and L2 used to hardcode 180s, so raising the budget moved L3 alone and
+    # an L1 timeout could not be configured away at all. Record every timeout
+    # the ladder hands the verifier, and assert the budget is what arrives.
+    seen = []
+
+    class _Recorder:
+        def run(self, _image, _code, _cmd, _mount, timeout_s, **_kw):
+            seen.append(timeout_s)
+            return verifier.RunResult(True, 0, "ok", "")
+
+        def outputs_listing(self):
+            return []
+
+    ladder.climb(_Recorder(), "img@sha256:" + "a" * 64, "code-vol", spec(),
+                 {"kind": "file", "value": "run.py"}, ["python", "run.py"], 451)
+    assert seen == [451, 451, 451], seen
+
+
 @check("ladder: rung ordering is what best-so-far rollback compares")
 def _l_rungs():
     assert ladder.rung_index("L3") > ladder.rung_index("L1") > ladder.rung_index("L0")
@@ -525,37 +665,316 @@ def _l_rungs():
 
 
 # ---------------------------------------------------------------- infra faults
-@check("infra: the daemon-unreachable message is recognised, not classified")
-def _i_daemon():
-    # The exact stderr that turned a successful L0 into an `UNKNOWN` corpus row.
-    real = ("permission denied while trying to connect to the Docker daemon socket "
-            "unix:///var/run/docker.sock")
-    assert verifier._DAEMON_UNREACHABLE.search(real)
-    for other in ("Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
-                  "Is the docker daemon running?"):
-        assert verifier._DAEMON_UNREACHABLE.search(other), other
-    # A genuine model failure must NOT be mistaken for an infra fault.
-    assert not verifier._DAEMON_UNREACHABLE.search(
-        "ModuleNotFoundError: No module named 'deSolve'")
+@check("infra: a k8s error surfaces its Status reason, not a raw body")
+def _i_status():
+    import urllib.error
+    body = json.dumps({"kind": "Status", "reason": "Forbidden",
+                       "message": 'pods is forbidden: User "sa" cannot create '
+                                  'resource "pods" in namespace "envbuild"'}).encode()
+    exc = urllib.error.HTTPError("u", 403, "Forbidden", {}, io.BytesIO(body))
+    msg = k8s.Client._status_message("POST", "/api/v1/pods", exc)
+    # The operator needs the missing rule named. "HTTP 403" alone does not.
+    assert "Forbidden" in msg and "cannot create" in msg, msg
 
 
-@check("infra: buildkitd preflight raises InfraError with remediation")
+@check("infra: builder preflight raises InfraError instead of building blind")
 def _i_builder():
-    b = LocalBuildKitBuilder("t", "tcp://127.0.0.1:9", "reg", "v0.24.0")
+    # The Role is missing the rule. Die here, not after a ten-minute build.
+    b = mk_builder(client=FakeClient(allow=False))
     try:
         b.check_builder()
-        raise AssertionError("unreachable builder did not raise")
+        raise AssertionError("a refused access review did not raise")
     except InfraError as exc:
-        assert "compose.host.yaml" in str(exc)      # names the actual fix
+        # Must name the file that actually fixes it -- deploy/rbac.yaml was a
+        # plausible-looking path that has never existed.
+        assert "deploy/envbuild.yaml" in str(exc), exc
+
+
+@check("infra: no cluster credential at all is an InfraError naming every option")
+def _i_no_cred():
+    saved = k8s._SA_DIR
+    k8s._SA_DIR = Path("/nonexistent/serviceaccount")
+    try:
+        k8s.Client.resolve(namespace="envbuild")
+        raise AssertionError("missing credential did not raise")
+    except InfraError as exc:
+        for hint in ("ENVBUILD_K8S_TOKEN", "ServiceAccount", "kubeconfig"):
+            assert hint in str(exc), exc
+    finally:
+        k8s._SA_DIR = saved
+
+
+@check("infra: auth precedence is explicit token, then ServiceAccount, then kubeconfig")
+def _i_auth_order():
+    saved = k8s._SA_DIR
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        sa = tmp / "sa"
+        sa.mkdir()
+        (sa / "token").write_text("sa-token")
+        (sa / "ca.crt").write_text("")
+        (sa / "namespace").write_text("from-sa")
+        k8s._SA_DIR = sa
+
+        # An explicit token outranks a mounted ServiceAccount.
+        c = k8s.Client.resolve(token="explicit", api_server="https://api.example")
+        assert c.token == "explicit" and c.api_server == "https://api.example"
+
+        # With no explicit token, the ServiceAccount wins -- and supplies the
+        # namespace, which is why in-cluster needs no configuration at all.
+        c = k8s.Client.resolve()
+        assert c.token == "sa-token" and c.namespace == "from-sa"
+        assert c.api_server == "https://kubernetes.default.svc"
+    finally:
+        k8s._SA_DIR = saved
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("infra: an exec-plugin kubeconfig is refused with a reason, not half-used")
+def _i_exec_kubeconfig():
+    saved = k8s._SA_DIR
+    k8s._SA_DIR = Path("/nonexistent/serviceaccount")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        kc = tmp / "kubeconfig"
+        kc.write_text(json.dumps({          # JSON is valid YAML
+            "current-context": "c",
+            "contexts": [{"name": "c", "context": {"cluster": "k", "user": "u"}}],
+            "clusters": [{"name": "k", "cluster": {"server": "https://api.example"}}],
+            "users": [{"name": "u", "user": {"exec": {"command": "kubelogin"}}}],
+        }))
+        try:
+            k8s.Client.resolve(kubeconfig=str(kc))
+            raise AssertionError("exec-plugin kubeconfig was accepted")
+        except InfraError as exc:
+            # Running a helper binary is the shape being removed; say so.
+            assert "credential plugin" in str(exc), exc
+    finally:
+        k8s._SA_DIR = saved
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("builder: nested registry keeps the job id in the path, flat folds it into the tag")
+def _k8s_naming():
+    b = mk_builder()
+    b.attempt = 3
+    assert b._image_name() == "registry:5000/envbuild/job-abc:a3"
+
+    b2 = mk_builder(registry_push="docker.io/mismplatform", flat_registry=True)
+    b2.attempt = 3
+    assert b2._image_name() == "docker.io/mismplatform/envbuild:job-abc-a3"
+
+
+@check("k8s: an object name always ends on an alphanumeric, whatever it is built from")
+def _k8s_object_name():
+    # The real failure: a UUID model id truncated onto a trailing dash, which the
+    # API server rejects with one error for the name and one for every label that
+    # carries it. Anything the caller hands us gets folded down, not trusted.
+    label = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+    for job_id in ("825c3a4f-dec1-4085-a1ae-495d043b1d5a",   # the one that broke
+                   "job-2026-09-15-a1b2",                     # the ordinary case
+                   "mism:model/1a2b3c",                       # colon and slash
+                   "UPPER_CASE_ID",                           # caps, underscore
+                   "x" * 80,                                  # longer than the limit
+                   "---",                                     # nothing usable at all
+                   ""):
+        name = k8s.object_name("envbuild", job_id, "a1")
+        assert label.match(name), name
+        assert len(name) <= 63, (len(name), name)
+    # Still unique per call -- two attempts must not collide on one pod name.
+    assert k8s.object_name("envbuild", "j", "a1") != k8s.object_name("envbuild", "j", "a1")
+
+
+@check("builder: pod name is a valid, unique k8s object name")
+def _k8s_pod_name():
+    b = mk_builder(job_id="job-2026-09-14-a10a")
+    b.attempt = 2
+    name = b._pod_name()
+    assert len(name) <= 63, name
+    assert re.match(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", name), name
+    assert name != b._pod_name()          # two calls, two different names
+
+
+@check("builder: a Kaniko log line maps back to the EnvSpec field")
+def _k8s_step_match():
+    # Real captured Kaniko output shape (v1.23.2): ANSI-colored INFO line
+    # echoing the rendered instruction verbatim, no "Step N/M" header.
+    rendered = render(spec())
+    pkg_step = rendered.steps[3]
+    assert pkg_step.kind == "pkg", pkg_step
+    # Kaniko flattens a multi-line rendered instruction onto one INFO line,
+    # same as the real captured output did.
+    flattened = " ".join(pkg_step.instruction.splitlines())
+    logs = "\n".join([
+        "\x1b[36mINFO\x1b[0m[0001] Retrieving image manifest python:3.11-slim",
+        f"\x1b[36mINFO\x1b[0m[0014] {flattened}",
+        "ERROR: Could not find a version that satisfies the requirement",
+        "error building image: error building stage: failed to execute command",
+    ])
+    step = builder.match_kaniko_step(logs, rendered.steps)
+    assert step is not None and step.index == pkg_step.index, step
+
+
+@check("config: an empty env override clears a config.ini value, not just unset")
+def _cfg_empty_override():
+    # deploy/agent-job.yaml sets ENVBUILD_K8S_TOKEN="" to mean "use the
+    # ServiceAccount this pod already has". If empty did not beat config.ini,
+    # an in-cluster run would try a stale token instead.
+    import os
+    import driver
+    os.environ["ENVBUILD_K8S_TOKEN"] = ""
+    try:
+        cfg = driver.load_config(None)
+        assert cfg.get("builder", "token") == ""
+    finally:
+        del os.environ["ENVBUILD_K8S_TOKEN"]
 
 
 @check("infra: InfraError is not a classifiable failure")
 def _i_not_classified():
     # Belt and braces: if one ever reaches the classifier, it must not be dressed
     # up as a repairable model failure with a confident action.
-    c = classify.classify("permission denied while trying to connect to the Docker "
-                          "daemon socket unix:///var/run/docker.sock", rung="L1")
+    c = classify.classify('pods is forbidden: User "system:serviceaccount:envbuild:'
+                          'envbuild" cannot create resource "pods"', rung="L1")
     assert c.action is None, c
+
+
+@check("builder: the build pod needs nothing that requires pods/exec")
+def _k8s_build_manifest():
+    # This is the security result of the whole design, so it is asserted rather
+    # than described: one container, no init containers, no sidecar. Anything
+    # that reappears here means bytes are moving through the API again, which
+    # means the Role needs pods/exec back.
+    b = mk_builder()
+    b.attempt = 1
+    pod = b._pod_manifest("p", "reg/envbuild/j:a1", "/workspace/context", 600)
+    spec = pod["spec"]
+    assert len(spec["containers"]) == 1, spec["containers"]
+    assert "initContainers" not in spec, spec
+    assert spec["automountServiceAccountToken"] is False
+    assert spec["activeDeadlineSeconds"] == 600
+    # Kaniko still writes the digest; the agent reads it off the shared volume.
+    args = spec["containers"][0]["args"]
+    assert any(a.startswith("--digest-file=") for a in args), args
+    assert any(a == "--context=dir:///workspace/context" for a in args), args
+
+
+@check("builder: the rendered Dockerfile reaches the pod on the work claim")
+def _k8s_build_writes_dockerfile():
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        client = FakeClient(exit_code=1, logs="INFO[0003] RUN pip install 'numpy<2'\nERROR")
+        b = K8sBuilder("job-abc", client, "registry:5000",
+                       work_pvc="envbuild-work", work_mount=str(tmp))
+        res = b.build(spec(), "", 600)
+        written = (tmp / "job-abc" / "a1" / "Dockerfile").read_text()
+        assert written == res.dockerfile and written.startswith("# generated by envbuild")
+        # The pod mounts exactly that attempt's directory, so two attempts of the
+        # same job cannot read each other's Dockerfile.
+        mount = res and client.created[0]["spec"]["containers"][0]["volumeMounts"][0]
+        assert mount["subPath"] == "job-abc/a1", mount
+        assert client.deleted == [client.created[0]["metadata"]["name"]]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("verifier: the verify pod is unprivileged, tokenless and network-denied")
+def _k8s_verify_manifest():
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        v = mk_verifier(work_mount=str(tmp))
+        pod = v._pod_manifest("p", "reg@sha256:x", "/models/mbmm/1.0", ["python", "run.py"],
+                              MountContract(), 300, network=False, env={"A": "1"})
+        spec_, meta = pod["spec"], pod["metadata"]
+        # Model code must not be handed a cluster credential.
+        assert spec_["automountServiceAccountToken"] is False
+        assert "serviceAccountName" not in spec_
+        # `--network none`, as a label the deny-all NetworkPolicy selects.
+        assert meta["labels"]["envbuild.io/network"] == "deny"
+        sec = spec_["containers"][0]["securityContext"]
+        assert sec["allowPrivilegeEscalation"] is False
+        assert sec["capabilities"]["drop"] == ["ALL"]
+        # Source is mounted read-only: a model cannot rewrite the corpus.
+        code = next(m for m in spec_["containers"][0]["volumeMounts"]
+                    if m["mountPath"] == MountContract().code_path)
+        # Artifacts are laid out <model_id>/<version>/, so the subPath is both
+        # segments -- mounting just "mbmm" would verify the wrong version.
+        assert code["readOnly"] is True and code["subPath"] == "mbmm/1.0", code
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("verifier: network=True drops the deny label, and L1 mounts no code")
+def _k8s_verify_network_and_l1():
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        v = mk_verifier(work_mount=str(tmp))
+        on = v._pod_manifest("p", "img", "/models/mbmm/1.0", ["true"], MountContract(),
+                             300, network=True, env=None)
+        # A pod no policy selects gets traffic; that is what "network on" means.
+        assert "envbuild.io/network" not in on["metadata"]["labels"]
+        l1 = v._pod_manifest("p", "img", "", ["true"], MountContract(), 300,
+                             network=False, env=None)
+        paths = [m["mountPath"] for m in l1["spec"]["containers"][0]["volumeMounts"]]
+        # L1 proves the image alone. Mounting code here would destroy the rung.
+        assert MountContract().code_path not in paths, paths
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("verifier: a pod log is reported as stderr, because k8s merges the streams")
+def _k8s_verify_run():
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        client = FakeClient(exit_code=1, logs="ModuleNotFoundError: No module named 'scipy'")
+        v = mk_verifier(client=client, work_mount=str(tmp))
+        res = v.run("img", "", ["python", "-c", "1"], MountContract(), 300)
+        assert not res.ok and res.exit_code == 1
+        # The classifier reads stderr; a merged stream in stdout would be invisible.
+        assert "ModuleNotFoundError" in res.stderr and res.stdout == ""
+        assert classify.classify(res.stderr, rung="L1").failure_class == "MISSING_DEPENDENCY"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("registry: a repository is not mistaken for a host")
+def _reg_parse():
+    # `mismplatform/envbuild` parsing as host `mismplatform` is how you spend an
+    # afternoon, so the host rule is asserted in both directions.
+    assert registry.parse_ref("python:3.11-slim") == (
+        "registry-1.docker.io", "library/python", "3.11-slim")
+    assert registry.parse_ref("mismplatform/envbuild:job-a1") == (
+        "registry-1.docker.io", "mismplatform/envbuild", "job-a1")
+    assert registry.parse_ref("registry:5000/envbuild/job/x:a2") == (
+        "registry:5000", "envbuild/job/x", "a2")
+    assert registry.parse_ref("ghcr.io/org/repo@sha256:" + "a" * 64) == (
+        "ghcr.io", "org/repo", "sha256:" + "a" * 64)
+
+
+@check("registry: image size sums the config and every layer")
+def _reg_size():
+    saved = registry.manifest
+    registry.manifest = lambda image, timeout_s=120: (
+        "sha256:" + "b" * 64,
+        {"mediaType": "application/vnd.oci.image.manifest.v1+json",
+         "config": {"size": 7}, "layers": [{"size": 100}, {"size": 2000}]})
+    try:
+        assert registry.image_size("x:1") == 2107
+    finally:
+        registry.manifest = saved
+
+
+@check("registry: an unreadable manifest is None, never a crashed build")
+def _reg_size_soft():
+    saved = registry.manifest
+    def boom(image, timeout_s=120):
+        raise registry.RegistryError("401")
+    registry.manifest = boom
+    try:
+        # A missing size must not fail a build that otherwise succeeded.
+        assert registry.image_size("x:1") is None
+    finally:
+        registry.manifest = saved
 
 
 # ---------------------------------------------------------------- record

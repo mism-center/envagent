@@ -34,6 +34,16 @@ RUNGS = ("L0", "L1", "L2", "L3", "L4")
 _SKIP_DIST = {"pip", "setuptools", "wheel", "build", "hatchling", "poetry-core",
               "flit-core", "meson-python", "scikit-build-core", "twine", "tox"}
 _PYPI_MODULE = {v.lower(): k for k, v in MODULE_PYPI.items()}
+# Extra dist -> module aliases that a straight reversal of MODULE_PYPI can't
+# express: several real distributions share one import module (opencv-python
+# and opencv-python-headless both give "cv2"), or differ only in case
+# ("ipython" installs "IPython"). Each was a real false L1 "missing" report
+# against an installed, working distribution.
+_PYPI_MODULE.update({
+    "opencv-python": "cv2",
+    "opencv-contrib-python": "cv2",
+    "ipython": "IPython",
+})
 
 # Probe run through `python -c` with the payload in an env var: keeps the docker
 # argv free of quoting hazards from LLM-authored package names.
@@ -157,27 +167,39 @@ def import_names(spec: EnvSpec) -> list[str]:
     return sorted(dict.fromkeys(mods))
 
 
+# Fallback only, for callers that construct a rung directly (tests). Every path
+# through `climb` passes `budgets.verify_timeout_s` instead. L1 and L2 used to
+# hardcode this number, which meant the config knob governed L3 alone: raising
+# `verify_timeout_s` to fix an L1 timeout changed nothing, and there was no
+# indication why. Seen on the AKS pass, where mbmm's L1 probe hit the hidden
+# 180s ceiling on an 857 MB R image.
+_DEFAULT_VERIFY_TIMEOUT_S = 180
+
+
 def _r_probe(mods: list[str]) -> list[str]:
     body = "; ".join(f'library({m})' for m in mods)
     return ["Rscript", "-e", body or "cat('L1 ok')"]
 
 
-def run_l1(verifier, image_ref: str, spec: EnvSpec) -> RunResult:
+def run_l1(verifier, image_ref: str, spec: EnvSpec,
+           timeout_s: int = _DEFAULT_VERIFY_TIMEOUT_S) -> RunResult:
     """Image alone, nothing mounted. A failure here is unambiguously ours."""
     mods = import_names(spec)
     if spec.pkg_manager in ("renv", "pkg"):
-        return verifier.run(image_ref, "", _r_probe(mods), spec.mount, 180)
+        return verifier.run(image_ref, "", _r_probe(mods), spec.mount, timeout_s)
     env = {"ENVBUILD_PROBE": _L1_PROBE, "ENVBUILD_MODS": ",".join(mods)}
-    return verifier.run(image_ref, "", ["python", "-c", _RUNNER], spec.mount, 180, env=env)
+    return verifier.run(image_ref, "", ["python", "-c", _RUNNER], spec.mount, timeout_s, env=env)
 
 
-def run_l2(verifier, image_ref: str, code_ref: str, spec: EnvSpec, entry: dict) -> RunResult:
+def run_l2(verifier, image_ref: str, code_ref: str, spec: EnvSpec, entry: dict,
+           timeout_s: int = _DEFAULT_VERIFY_TIMEOUT_S) -> RunResult:
     """Code mounted. Parses the entry point and resolves its imports without
     executing it -- enough to separate a missing dependency from a broken mount,
     cheap enough to run every attempt."""
     if entry.get("kind") == "module":
         env = {"ENVBUILD_PROBE": _L2_MODULE_PROBE, "ENVBUILD_ENTRY": entry["value"]}
-        return verifier.run(image_ref, code_ref, ["python", "-c", _RUNNER], spec.mount, 180, env=env)
+        return verifier.run(image_ref, code_ref, ["python", "-c", _RUNNER], spec.mount,
+                            timeout_s, env=env)
     entry_file = entry.get("value") or ""
     path = entry_file if entry_file.startswith("/") else f"{spec.mount.code_path}/{entry_file}"
     if spec.pkg_manager in ("renv", "pkg"):
@@ -185,9 +207,10 @@ def run_l2(verifier, image_ref: str, code_ref: str, spec: EnvSpec, entry: dict) 
                             ["Rscript", "-e", f'if (!file.exists("{path}")) '
                              f'{{cat("ENVBUILD_ENTRYPOINT_MISSING: {path}\\n"); quit(status=1)}}; '
                              f'invisible(parse("{path}"))'],
-                            spec.mount, 180)
+                            spec.mount, timeout_s)
     env = {"ENVBUILD_PROBE": _L2_PROBE, "ENVBUILD_ENTRY": path}
-    return verifier.run(image_ref, code_ref, ["python", "-c", _RUNNER], spec.mount, 180, env=env)
+    return verifier.run(image_ref, code_ref, ["python", "-c", _RUNNER], spec.mount,
+                        timeout_s, env=env)
 
 
 def run_l3(verifier, image_ref: str, code_ref: str, spec: EnvSpec, command,
@@ -230,7 +253,7 @@ def climb(verifier, image_ref: str, code_ref: str, spec: EnvSpec, entry: dict,
     result = LadderResult(reached="L0" if start == "L1" else "L1")
 
     if start == "L1":
-        r1 = run_l1(verifier, image_ref, spec)
+        r1 = run_l1(verifier, image_ref, spec, verify_timeout_s)
         result.stdout, result.stderr = r1.stdout, r1.stderr
         result.exit_code, result.timed_out = r1.exit_code, r1.timed_out
         if not r1.ok:
@@ -247,7 +270,7 @@ def climb(verifier, image_ref: str, code_ref: str, spec: EnvSpec, entry: dict,
         result.exit_code = 1
         return result
 
-    r2 = run_l2(verifier, image_ref, code_ref, spec, entry)
+    r2 = run_l2(verifier, image_ref, code_ref, spec, entry, verify_timeout_s)
     result.stdout, result.stderr = r2.stdout, r2.stderr
     result.exit_code, result.timed_out = r2.exit_code, r2.timed_out
     if not r2.ok:

@@ -4,7 +4,7 @@ An agent that turns a registered model into a **verified execution environment**
 and tells you honestly when it can't.
 
 Given a source repo and (ideally) an approved annotation YAML, `envbuild`
-synthesises a structured build spec, builds it with BuildKit, climbs a
+synthesises a structured build spec, builds it with Kaniko, climbs a
 verification ladder, classifies whatever broke, applies exactly one typed repair,
 and repeats — writing a complete record of every attempt along the way.
 
@@ -50,7 +50,7 @@ access has not been verified.
 ```
 SKILL.md              the skill: modes init | run | inspect | replay
 config.ini            endpoints, budgets, pinned versions
-compose.yaml          agent + buildkitd + registry
+deploy/               namespace, ServiceAccount, Role, PVC, NetworkPolicy, Job
 specs/                the prose contracts the model reads
   failure_taxonomy.md   classes, routing, the MISSING_DEPENDENCY/IMPORT_PATH_ERROR split
   remediation_actions.md the twelve typed actions and their arguments
@@ -65,8 +65,10 @@ src/
   patch.py              apply one typed action to an EnvSpec
   classify.py           rule table -> class + action (LLM is the fallback)
   normalize.py          stderr -> stable error signature
-  builder.py            <- seam: Builder protocol + LocalBuildKitBuilder
-  verifier.py           <- seam: Verifier protocol + LocalDockerVerifier
+  k8s.py                the whole Kubernetes surface: create, get, log, delete
+  registry.py           tag -> digest, digest -> bytes, over plain HTTPS
+  builder.py            <- seam: Builder protocol + K8sBuilder (Kaniko pod)
+  verifier.py           <- seam: Verifier protocol + K8sVerifier (one pod per rung)
   ladder.py             L0-L3
   record.py             attempt + verdict emission, with completeness enforced
   driver.py             the CLI: loop, budgets, teardown
@@ -80,16 +82,26 @@ outputs/              attempts.jsonl, verdicts.jsonl, per-job state
 ### Offline (no Docker) — the whole rule layer
 
 ```bash
-uv run scripts/test_envbuild.py       # 46 checks: renderer, every action, rules, goldens
+uv run scripts/test_envbuild.py       # renderer, every action, rules, goldens
 uv run src/driver.py render --spec my-spec.json
 ```
 
-### With the stack
+### In the cluster
+
+Everything runs as pods: the agent, the Kaniko build, and each verification rung.
 
 ```bash
-export DOCKER_GID=$(getent group docker | cut -d: -f3)
-docker compose up -d buildkitd registry
+kubectl apply -f deploy/envbuild.yaml
+kubectl -n default create secret generic envbuild-registry-auth \
+    --from-file=.dockerconfigjson=$HOME/.docker/config.json \
+    --type=kubernetes.io/dockerconfigjson
 
+./run.sh mbmm/1.0 mism:model/mbmm      # <model_id>/<version> on irods-pvc
+```
+
+Or drive the CLI directly from inside the agent pod:
+
+```bash
 uv run src/driver.py init --repo ./fixtures/import_path_error \
     --annotation ./fixtures/import_path_error/annotation.yaml \
     --model-id fixture:import_path_error --job-id demo
@@ -100,18 +112,15 @@ uv run src/driver.py attempt --job-id demo          # exit 0 -> L3
 uv run src/driver.py verdict --job-id demo --status verified
 ```
 
-Driving from the host needs two things the agent container already has:
+Two claims carry everything, and the split is deliberate:
 
-```bash
-# 1. buildctl, from the SAME pinned builder the daemon runs
-docker run --rm --entrypoint cat moby/buildkit:v0.24.0 /usr/bin/buildctl > ~/.local/bin/buildctl
-chmod +x ~/.local/bin/buildctl
+| Claim | Mounted | Holds |
+|---|---|---|
+| `irods-pvc` | **read-only**, everywhere | model source, laid out `<model_id>/<version>/` |
+| `envbuild-work` | read-write | rendered Dockerfiles, Kaniko's digest file, each job's `inputs/` and `outputs/` |
 
-# 2. a reachable buildkitd -- the base compose file leaves it unpublished on
-#    purpose, so add the loopback overlay and point the driver at it
-docker compose -f compose.yaml -f compose.host.yaml up -d buildkitd registry
-export ENVBUILD_BUILDKIT_HOST=tcp://127.0.0.1:1234
-```
+Bytes move on those claims, never through the API. That is what removed the
+`kubectl cp`/`exec` staging dance — and with it the need for `pods/exec`.
 
 ### As a headless Pi agent
 
@@ -176,8 +185,9 @@ image size ceiling · context tar ceiling. All in `config.ini`.
 `Builder` and `Verifier` are separate `Protocol`s on purpose — build and verify
 are different pods with different isolation requirements, and separating them now
 is what makes gVisor-on-execution a drop-in later rather than a rewrite. Phase 0
-ships `LocalBuildKitBuilder` and `LocalDockerVerifier`; the in-cluster versions
-swap in without `driver.py` changing.
+ships `K8sBuilder` (a Kaniko pod per attempt) and `K8sVerifier` (a pod per rung,
+tokenless and network-denied); the infra team's own versions swap in without
+`driver.py` changing.
 
 The whole contract surface is five things: those two protocols,
 [`specs/record_schema.md`](specs/record_schema.md) (attempt + verdict JSON), and

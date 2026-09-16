@@ -1,6 +1,6 @@
 ---
 name: envbuild
-description: Turn a registered computational model (a git repo plus an approved annotation YAML) into a verified execution environment — a digest-pinned dependency image pushed to a registry, a verification level (L0–L3), and a complete record of every attempt made to get there. Runs a search-with-verification loop: synthesize a structured EnvSpec, build it with BuildKit, climb the verification ladder, classify the failure, apply exactly one typed repair, repeat until verified or out of budget. Use whenever a user asks to build, containerize, dockerize, reproduce, or verify the execution environment for a model or repo — including "make this repo runnable", "build an image for this model", "does this model actually run", "why won't this install", or "reverify this after the code changed". Trusted-corpus repos only.
+description: Turn a registered computational model (a git repo plus an approved annotation YAML) into a verified execution environment — a digest-pinned dependency image pushed to a registry, a verification level (L0–L3), and a complete record of every attempt made to get there. Runs a search-with-verification loop: synthesize a structured EnvSpec, build it with Kaniko, climb the verification ladder, classify the failure, apply exactly one typed repair, repeat until verified or out of budget. Use whenever a user asks to build, containerize, dockerize, reproduce, or verify the execution environment for a model or repo — including "make this repo runnable", "build an image for this model", "does this model actually run", "why won't this install", or "reverify this after the code changed". Trusted-corpus repos only.
 ---
 
 # envbuild
@@ -71,27 +71,23 @@ replays L2–L3 against the existing image and skips the expensive part entirely
 
 ### Step 0 — Preconditions
 
-Confirm the repo is corpus-trusted. Then check the stack is up:
+Confirm the repo is corpus-trusted. Then run the substrate check — the CLI does
+it for you, and it is one access review rather than a build:
 
 ```bash
-docker compose -f "$SKILL_DIR/compose.yaml" ps
+envbuild init ...        # preflights before it does anything expensive
 ```
 
-`buildkitd` and `registry` must both be running, and `buildctl` must be on
-`PATH`. If you are driving from the **host** (a Claude Code session rather than
-the Pi container), both need one-time setup:
+**You have no cluster tools and do not need any.** There is no `kubectl` and no
+`docker` in this image. Builds and verification runs are pods the CLI creates
+over the Kubernetes API, as a ServiceAccount that can create pods and read their
+logs and nothing else. It has **no `pods/exec`** — if you catch yourself wanting
+a shell inside a running container, the answer is a rung, not a shell.
 
-```bash
-docker run --rm --entrypoint cat moby/buildkit:v0.24.0 /usr/bin/buildctl > ~/.local/bin/buildctl
-chmod +x ~/.local/bin/buildctl
-docker compose -f "$SKILL_DIR/compose.yaml" -f "$SKILL_DIR/compose.host.yaml" \
-  up -d buildkitd registry
-export ENVBUILD_BUILDKIT_HOST=tcp://127.0.0.1:1234
-```
-
-The base compose file leaves buildkitd unpublished on purpose; `compose.host.yaml`
-binds it to loopback only. If any of this is missing, say so — do not try to build
-without it.
+Cluster setup is an operator's job, done once, from `deploy/envbuild.yaml` plus
+two Secrets (`envbuild-registry-auth`, `envbuild-llm`). If preflight reports a
+missing RBAC rule, an unreachable API server or a missing claim, say so and write
+an `error` verdict — do not try to work around it.
 
 ### Step 1 — `init`
 
@@ -159,10 +155,11 @@ Every exit path writes a verdict. Do not end a job without one:
 envbuild verdict --job-id "$JOB" --status verified
 envbuild verdict --job-id "$JOB" --status failed   --reason "annotation declares no entry point"
 envbuild verdict --job-id "$JOB" --status escalated --reason "MATLAB toolchain"
-envbuild verdict --job-id "$JOB" --status error    --reason "buildkitd unreachable"
+envbuild verdict --job-id "$JOB" --status error    --reason "cluster unreachable"
 ```
 
-`verdict` also tears down: containers, named volumes, pulled images, build cache.
+`verdict` also tears down: any pods this job created, and its scratch directory
+on the work claim.
 Budget exhaustion writes its own verdict and tears down for you. If anything
 crashes mid-run, call `verdict --status error` before you stop.
 
