@@ -71,6 +71,13 @@ spec:
               value: "__MODELS_PVC__"
             - name: ENVBUILD_MODELS_MOUNT
               value: /models
+            # Run provenance, stamped on every attempt/verdict row (`run`).
+            # The first corpus mixed three passes in one attempts.jsonl with
+            # nothing on the row to tell them apart.
+            - name: ENVBUILD_RUN_ID
+              value: "__RUN_ID__"
+            - name: ENVBUILD_HARNESS_IMAGE
+              value: "__AGENT_IMAGE__"
           envFrom:
             # Tuning first, credentials second. envFrom applies in order, so a
             # Secret always wins over a ConfigMap anyone with edit rights can

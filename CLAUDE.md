@@ -89,6 +89,43 @@ When you change one of these, check the others:
 | a Kubernetes API call | `src/k8s.py`, the `FakeClient` in `scripts/test_envbuild.py` |
 | an RBAC verb the code needs | `deploy/envbuild.yaml` Role, and say why in the comment |
 | a pod manifest field | `src/builder.py` or `src/verifier.py`, and the manifest assertions in the test suite |
+| a classifier rule | `src/classify.py:_rules()`, a case in the test suite, then `uv run scripts/reclassify.py outputs/attempts.jsonl` to see what it does to the corpus |
+| the L1 probe's message shapes | `src/ladder.py` `_L1_PROBE`, the rules that read them (`dist_not_installed`, `py_module`, `missing_soname`) |
+| the step-marker format | `src/envspec.py` `STEP_MARKER`/`find_step_marker`, `src/builder.py` `_MARKER_PREFIX` |
+| the bootstrap pins | `src/envspec.py` `BOOTSTRAP_PINS` — between corpus runs only; signatures move |
+| a refused `ADD_PRE_INSTALL_CMD` shape | `src/patch.py` `_PRE_INSTALL_FORBIDDEN`, `specs/remediation_actions.md` |
+| an annotation finding code or correction outcome | `src/examples.py`, `src/driver.py` (`resolve_corrections`), `specs/success_criteria.md`, `scripts/score.py` |
+| the ground-truth example for a benchmark model | `bench/ground_truth.yaml` (and set `human_verified` when someone has actually run it) |
+
+## Log bytes go through `src/logs.py` first
+
+Nothing reads a pod log raw. `logs.decode()` strips ANSI, unwraps BuildKit
+progress frames (the real message is base64 inside `"data"`), drops Kaniko's
+`INFO[t]` prefix and collapses repeated lines; `logs.tail()` decodes *before*
+truncating. `classify.classify()` calls it itself, so a caller cannot forget,
+but `error_raw`, `stderr_tail` and signatures must also be built from decoded
+text — the first corpus run recorded raw tails and 111 of 176 rows were
+`UNKNOWN` for that reason alone. `scripts/reclassify.py` replays the current
+table over historical rows; run it before and after any rule change.
+
+## Success is the repo's example
+
+`src/examples.py` discovers what the repo says to run; `init` checks the
+annotation against it, chooses the L3 command (recording `entrypoint_source`),
+and derives `mount.workdir` when a script opens files relative to itself. The
+agent may `SET_ENTRYPOINT` to a grounded example (twice per job); every
+correction is judged by the ladder and written to the verdict and to
+`jobs/<job>/annotation-patch.yaml` — the annotation itself is never edited.
+`scripts/score.py` scores a pass against `bench/ground_truth.yaml`. Read
+`specs/success_criteria.md` before changing any of this.
+
+## Three failure planes
+
+`INFRA_UNAVAILABLE` routes to `"infra"`: the driver keeps the row (`charged:
+false`), does not count the attempt, refuses `patch`, and lets the agent re-run
+the same spec up to `max_infra_retries`. Do not add a typed action for anything
+in this plane, and do not let a rule below `infra_network` fire on network text
+(`no_matching_dist` had to learn that).
 
 Bumping the builder is a deliberate act: it introduces a discontinuity in error
 signatures across the corpus. Do it between corpus runs, not during one.

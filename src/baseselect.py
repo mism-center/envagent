@@ -118,6 +118,8 @@ def guess_install_mode(evidence: dict) -> tuple[str, str]:
         reasons.append("Makefile/CMakeLists present")
     if c.get("editable_hint"):
         reasons.append("docs call for `pip install -e`")
+    if c.get("project_install_hint"):
+        reasons.append("README installs the project itself (pip install ., uv sync/run, poetry install)")
     if reasons:
         return "installed", "; ".join(reasons)
     return "mounted", "no compiled extensions or build step found"

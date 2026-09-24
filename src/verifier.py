@@ -130,7 +130,10 @@ class K8sVerifier:
     def _models_sub(self, code_ref: str) -> str:
         """An absolute path under the models mount -> the subPath in the claim."""
         try:
-            return str(Path(code_ref).relative_to(self.models_mount))
+            # as_posix(): a subPath is a path *inside the pod*, so it is '/'
+            # separated whatever OS this process runs on. Under a Windows-hosted
+            # run, str() produced `mbmm\1.0` and the pod mounted nothing.
+            return Path(code_ref).relative_to(self.models_mount).as_posix()
         except ValueError as exc:
             raise InfraError(
                 f"model source {code_ref} is not under the models mount "

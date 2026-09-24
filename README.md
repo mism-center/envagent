@@ -177,7 +177,22 @@ all five; the agent cannot opt out.
   failure mode that corrupts the dataset.
 - **Teardown in `finally`.** Containers, volumes, images, build cache.
 
-Budgets: 5 attempts · 20 min wall clock · 10 min per build · 3 min per verify ·
+Substrate failures (`INFRA_UNAVAILABLE`: DNS, registry, index, scheduling) are
+retried with the same spec, uncharged, up to `max_infra_retries`; the row is kept
+with `charged: false`. Every RUN in a rendered Dockerfile prints a step marker,
+so `failed_step_index` is an integer lookup rather than a prefix match. After L1
+the probe reads `importlib.metadata` inside the image and emits a lockfile; its
+hash joins the approval unit as *(image digest, lockfile, code revision)*.
+
+**Success means the container runs the example the repo itself provides.**
+`init` discovers the repo's examples, checks the annotation's entry points
+against them, and picks the L3 command accordingly; the agent may correct an
+entry point (`SET_ENTRYPOINT`, grounded, twice per job) and every correction
+is judged by the ladder and proposed back as `annotation-patch.yaml` — the
+annotation is never edited. `scripts/score.py` scores a pass against
+`bench/ground_truth.yaml`. See [`specs/success_criteria.md`](specs/success_criteria.md).
+
+Budgets: 5 charged attempts · 20 min wall clock net of infra time · 10 min per build · 3 min per probe · 10 min for the example (annotation-sized up to 30) ·
 image size ceiling · context tar ceiling. All in `config.ini`.
 
 ## Seams for the infra team

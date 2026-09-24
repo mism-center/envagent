@@ -72,6 +72,10 @@ SLUG="$(sanitise "$(printf '%.8s%s%s' "$ID_PART" "${VER_PART:+-}" "$VER_PART")")
 SLUG="${SLUG#-}"; SLUG="${SLUG%-}"
 SLUG="$(printf '%s' "$SLUG" | cut -c1-28)"; SLUG="${SLUG%-}"
 JOB="$(date +%Y%m%d-%H%M%S)-${SLUG:-job}"
+# One id per benchmark pass, shared by every job in it, so the rows of a pass
+# can be selected with one filter instead of reconstructed from log filenames.
+# Set ENVBUILD_RUN_ID once per pass; the default is one id per invocation.
+RUN_ID="${ENVBUILD_RUN_ID:-run-$(date +%Y%m%d-%H%M%S)}"
 
 for s in envbuild-registry-auth envbuild-llm; do
   kubectl -n "$NS" get secret "$s" >/dev/null 2>&1 || {
@@ -86,9 +90,11 @@ sed -e "s|__JOB__|$JOB|g" \
     -e "s|__ANNOTATION__|$ANNOTATION|g" \
     -e "s|__MODELS_PVC__|$MODELS_PVC|g" \
     -e "s|__AGENT_IMAGE__|$AGENT_IMAGE|g" \
+    -e "s|__RUN_ID__|$RUN_ID|g" \
     deploy/agent-job.yaml | kubectl -n "$NS" apply -f -
 
 echo "job:     envbuild-$JOB"
+echo "run:     $RUN_ID  (rows carry it as run.run_id)"
 echo "model:   $MODEL_REPO  (claim $MODELS_PVC, read-only)"
 echo "image:   $AGENT_IMAGE"
 echo "logs:    kubectl -n $NS logs -f job/envbuild-$JOB"

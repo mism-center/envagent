@@ -35,22 +35,28 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import dataclasses
 import datetime as dt
 import difflib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 import uuid
+
+import yaml
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import baseselect                                    # noqa: E402
 import classify as classify_mod                      # noqa: E402
-import evidence as evidence_mod                      # noqa: E402
+import evidence as evidence_mod
+import examples as examples_mod                      # noqa: E402
 import ladder as ladder_mod                          # noqa: E402
+import logs as logs_mod                              # noqa: E402
 import normalize                                     # noqa: E402
 import patch as patch_mod                            # noqa: E402
 import record                                        # noqa: E402
@@ -81,12 +87,16 @@ def load_config(path: str | None) -> configparser.ConfigParser:
                     "work_pvc": "envbuild-work",
                     "work_mount": "/work",
                     "models_pvc": "irods-pvc",
-                    "models_mount": "/models"},
+                    "models_mount": "/models",
+                    "cache_repo": ""},
         "verifier": {"memory": ""},
         "budgets": {"max_attempts": "5", "wall_clock_s": "1200",
                     "build_timeout_s": "600", "verify_timeout_s": "180",
+                    "l3_timeout_s": "600", "l3_timeout_max_s": "1800",
+                    "max_infra_retries": "2",
                     "max_image_bytes": str(8 * 1024 ** 3),
                     "max_context_bytes": str(256 * 1024 ** 2)},
+        "run": {"run_id": "", "harness_image": "", "agent_model": "", "agent_provider": ""},
         "paths": {"outputs": str(SKILL_DIR / "outputs")},
     })
     cfg.read([str(SKILL_DIR / "config.ini")] + ([path] if path else []))
@@ -105,11 +115,40 @@ def load_config(path: str | None) -> configparser.ConfigParser:
         "ENVBUILD_WORK_MOUNT": ("builder", "work_mount"),
         "ENVBUILD_MODELS_PVC": ("builder", "models_pvc"),
         "ENVBUILD_MODELS_MOUNT": ("builder", "models_mount"),
+        "ENVBUILD_CACHE_REPO": ("builder", "cache_repo"),
         "ENVBUILD_OUTPUTS": ("paths", "outputs"),
+        # Run provenance, stamped on every row. Set by the Job manifest / the
+        # harness; a host-driven run leaves them empty and the rows say so.
+        "ENVBUILD_RUN_ID": ("run", "run_id"),
+        "ENVBUILD_HARNESS_IMAGE": ("run", "harness_image"),
+        "AI_MODEL": ("run", "agent_model"),
+        "AI_PROVIDER": ("run", "agent_provider"),
     }.items():
         if env in os.environ:
             cfg.set(sec, key, os.environ[env])
     return cfg
+
+
+def run_provenance(cfg) -> dict:
+    """Which run produced a row. The first corpus mixed three passes (local
+    BuildKit, AKS before and after the renderer fix) in one attempts.jsonl with
+    nothing on the row to tell them apart; RESULTS.md had to reconstruct passes
+    from log filenames."""
+    return {
+        "run_id": cfg.get("run", "run_id"),
+        "harness_image": cfg.get("run", "harness_image"),
+        "agent_model": cfg.get("run", "agent_model"),
+        "agent_provider": cfg.get("run", "agent_provider"),
+        "kaniko_image": cfg.get("builder", "kaniko_image"),
+        "cache_repo": cfg.get("builder", "cache_repo"),
+    }
+
+
+# Model ids are `<scheme>:<path>` (`mism:model/mbmm`, `bench:mbmm`, `local:repo`).
+# The first corpus has four rows whose model_id is an LLM model name because the
+# agent passed the wrong value; a shape check at init is cheaper than four
+# unreadable rows.
+_MODEL_ID = re.compile(r"^[a-z][a-z0-9]*:[A-Za-z0-9._/\-]+$")
 
 
 # ---------------------------------------------------------------- state
@@ -227,6 +266,10 @@ def make_builder(cfg, state) -> K8sBuilder:
         docker_config_secret=cfg.get("builder", "docker_config_secret"),
         insecure_registry=cfg.getboolean("builder", "insecure_registry"),
         flat_registry=cfg.getboolean("builder", "flat_registry"),
+        cache_repo=cfg.get("builder", "cache_repo"),
+        labels={"io.envbuild.model_id": state["model_id"],
+                "io.envbuild.code_revision": state.get("code_revision", "unknown"),
+                "io.envbuild.run_id": cfg.get("run", "run_id")},
     )
     b.attempt = state["attempt"]          # keep image tags aligned with attempts
     return b
@@ -259,6 +302,37 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
     if choice.pkg_manager == "mamba":
         deps = list((ev.get("conda") or {}).get("deps") or deps)
     apt = sorted(set(list(ann.get("system_deps") or []) + list(ev["system_hints"]["apt"])))
+    # Honour the author's lockfile: every declared dependency it resolves gets
+    # its locked version, extras kept, other constraints replaced. Direct deps
+    # only -- pip then resolves the transitive closure against the pins, which
+    # keeps the spec readable (11 pins, not 123) and every pin attributable.
+    lock = ev.get("lockfile") or {}
+    draft_spec.lock_pins = []
+    if choice.pkg_manager == "pip" and lock.get("versions") and lock.get("usable", True):
+        pinned = []
+        for d in deps:
+            name = patch_mod.req_name(d) if isinstance(d, str) else ""
+            key = re.sub(r"[-_.]+", "-", name).lower() if name else ""
+            if key and key in lock["versions"] and "==" not in d:
+                extras = re.search(r"\[[^\]]*\]", d)
+                new_d = f"{name}{extras.group(0) if extras else ''}=={lock['versions'][key]}"
+                draft_spec.lock_pins.append((d, new_d))
+                d = new_d
+            pinned.append(d)
+        deps = pinned
+    # Third-party modules the package's own code imports that nothing declares
+    # and the lockfile does not know (spatio-flux: `import xarray` inside
+    # write_run_zarr; 14 min into L3 -> ModuleNotFoundError). A fact about the
+    # code, so it goes into the draft; cmd_init reports `undeclared_imports`.
+    draft_spec.undeclared = []
+    if choice.pkg_manager == "pip":
+        have = {re.sub(r"[-_.]+", "-", (patch_mod.req_name(d) or "")).lower() for d in deps if isinstance(d, str)}
+        for mod, dist in sorted(((ev.get("python") or {}).get("undeclared_imports") or {}).items()):
+            key = re.sub(r"[-_.]+", "-", dist).lower()
+            if key not in have:
+                have.add(key)
+                deps.append(dist)
+                draft_spec.undeclared.append((mod, dist))
     # A local module living directly at repo root or under src/ needs that
     # directory on the import path -- the entry point's own file is often
     # nested a few levels below it, so relying on "the entry file's own
@@ -275,6 +349,21 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
                 mount.code_path if not d else f"{mount.code_path}/{d}" for d in local_dirs
             ),
         })
+    # An annotation "dependency" that is a whole toolchain (`GAMA Platform1.8`)
+    # or otherwise not a package spec would render as `install.packages("GAMA")`
+    # and send the loop chasing MISSING_DEPENDENCY. Drop it here; cmd_init turns
+    # `draft_spec.dropped_deps` into a finding the agent and the record can see.
+    keep, dropped = [], []
+    for d in deps:
+        name = patch_mod.req_name(d) if isinstance(d, str) else ""
+        if (not isinstance(d, str) or " " in d.strip()
+                or classify_mod.UNSUPPORTED_TOOLS.match(name or d)):
+            dropped.append(d)
+        else:
+            keep.append(d)
+    deps = keep
+    draft_spec.dropped_deps = dropped
+
     return EnvSpec(
         base_image=choice.base_image,
         base_digest=digest,
@@ -289,10 +378,58 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
     )
 
 
+def resolve_corrections(state: dict, reached: str, ok: bool, failure_class: str | None) -> None:
+    """A pending annotation correction is judged by the rung it was meant to
+    fix. `verified` when L3 passes; `helped` when the run got past L2 (the
+    entry exists and its imports resolve) but L3 failed for a reason that may
+    well be the environment's; `rejected` only when the corrected entry itself
+    was found missing. Anything else stays pending -- an L1 failure says
+    nothing about the entry -- and the verdict closes leftovers as
+    `unverified`. Rejected and unverified corrections stay on the record (a
+    wrong guess is data) but never reach the patch file."""
+    for c in state.get("annotation_corrections") or []:
+        if c.get("outcome") != "pending":
+            continue
+        if ok:
+            c["outcome"] = "verified"
+        elif failure_class == "ENTRYPOINT_UNKNOWN":
+            c["outcome"] = "rejected"
+        elif ladder_mod.rung_index(reached) >= ladder_mod.rung_index("L2"):
+            c["outcome"] = "helped"
+
+
+def choose_entry(ann: dict, ev: dict, findings: list[dict]) -> tuple[str, str, dict | None]:
+    """The command L3 runs, where it came from, and a correction record if the
+    annotation's own entry was not usable.
+
+    Order: the annotation's first entry that is a real command with an existing
+    script and no placeholders (`annotation`); otherwise the repo's first smoke
+    example (`repo_example`), recorded as a correction of the annotation. The
+    annotation is human-reviewed, so it wins whenever it is runnable; the point
+    is only that `R` and `GUI: open X` do not get to burn the budget.
+    """
+    bad = {f["entry"] for f in findings if f["code"] in ("not_a_command", "file_missing", "placeholder_args")}
+    entries = [e.get("command") or "" for e in (ann.get("entry_points") or [])]
+    for cmd in entries:
+        if cmd and cmd not in bad:
+            return cmd, "annotation", None
+    smoke = next((e for e in (ev.get("examples") or [])
+                  if e["tier"] == "smoke" and not e.get("placeholders")), None)
+    if smoke:
+        return smoke["command"], "repo_example", {
+            "field": "entry_points[0].command", "was": entries[0] if entries else None,
+            "now": smoke["command"], "evidence": f"repo example ({smoke['source']})",
+            "applied_by": "init", "outcome": "pending"}
+    return (entries[0] if entries else ""), ("annotation" if entries else "none"), None
+
+
 def cmd_init(args, cfg) -> None:
     repo = str(Path(args.repo).resolve())
     if not Path(repo).is_dir():
         die(f"--repo is not a directory: {repo}")
+    if args.model_id and not _MODEL_ID.match(args.model_id):
+        die(f"--model-id {args.model_id!r} is not <scheme>:<path> (e.g. mism:model/mbmm, "
+            f"bench:mbmm). This is the model's registry id, not the LLM model name.")
     job_id = args.job_id or f"job-{dt.datetime.now():%Y-%m-%d}-{uuid.uuid4().hex[:4]}"
     max_ctx = cfg.getint("budgets", "max_context_bytes")
 
@@ -312,8 +449,41 @@ def cmd_init(args, cfg) -> None:
         die(str(exc), code=4)
 
     spec = draft_spec(ev, ann, choice, digest, builder_id(cfg))
-    entry = ladder_mod.entry_from_command(
-        (ann.get("entry_points") or [{}])[0].get("command") or "")
+
+    # The annotation's entry points, judged against what the repo itself ships.
+    # Findings are deterministic and cost nothing; an unusable entry is replaced
+    # by the repo's own smoke example and the replacement is recorded as a
+    # correction *proposal* -- the annotation file is never edited.
+    findings = examples_mod.check_annotation(repo, ann, ev.get("examples") or [])
+    for d in getattr(draft_spec, "dropped_deps", None) or []:
+        tool = classify_mod.UNSUPPORTED_TOOLS.match(str(d))
+        findings.append({"code": "unsupported_tool_dependency" if tool else "not_a_package_spec",
+                         "entry": str(d), "suggestion": None,
+                         "detail": ("names a toolchain no Phase 0 base provides; if the model needs it, "
+                                    "the honest verdict is escalated (UNSUPPORTED_TOOLCHAIN)" if tool
+                                    else "not a package spec; dropped from pkg_specs")})
+    if getattr(draft_spec, "lock_pins", None):
+        findings.append({"code": "lockfile_honoured", "entry": (ev.get("lockfile") or {}).get("file"),
+                         "suggestion": None,
+                         "detail": f"{len(draft_spec.lock_pins)} declared dependencies pinned to the repo's "
+                                   f"lockfile: " + ", ".join(n for _, n in draft_spec.lock_pins[:8])})
+    if getattr(draft_spec, "undeclared", None):
+        findings.append({"code": "undeclared_imports", "entry": None, "suggestion": None,
+                         "detail": "the package imports modules no dependency list or lockfile declares; "
+                                   "added to pkg_specs unpinned: "
+                                   + ", ".join(f"{m} ({d})" for m, d in draft_spec.undeclared)})
+    command, entry_source, correction = choose_entry(ann, ev, findings)
+    corrections = [correction] if correction else []
+    entry = ladder_mod.entry_from_command(command)
+    # A script that opens files relative to its own directory needs that
+    # directory as workdir. Derivable here, so derive it here -- circadian-clock
+    # spent four jobs rediscovering this at L3.
+    wd = examples_mod.derive_workdir(repo, entry.get("value") if entry.get("kind") == "file" else None)
+    if wd and spec.mount.workdir == spec.mount.code_path:
+        spec.mount = dataclasses.replace(spec.mount, workdir=f"{spec.mount.code_path}/{wd}")
+        corrections.append({"field": "mount.workdir", "was": spec.mount.code_path,
+                            "now": spec.mount.workdir, "evidence": f"{entry['value']} opens files relative to {wd}/",
+                            "applied_by": "init", "outcome": "pending"})
 
     state = {
         "job_id": job_id,
@@ -326,7 +496,11 @@ def cmd_init(args, cfg) -> None:
         "attempt": 0,
         "spec": spec.to_dict(),
         "entry": entry,
-        "command": (ann.get("entry_points") or [{}])[0].get("command") or "",
+        "command": command,
+        "entrypoint_source": entry_source,
+        "entrypoint_changes": 0,
+        "annotation_findings": findings,
+        "annotation_corrections": corrections,
         # Only assert "wrote files" when the model record says where it writes.
         "expect_outputs": bool((ann.get("entry_points") or [{}])[0]
                               .get("default_output_location")),
@@ -335,6 +509,9 @@ def cmd_init(args, cfg) -> None:
         "patched_since_attempt": True,       # the draft counts as the first spec
         "closed": False,
         "local_modules": ev.get("local_modules") or [],
+        "examples": ev.get("examples") or [],
+        # The project's own interpreter constraint, for CHANGE_INTERPRETER_VERSION.
+        "requires_python": (ev.get("python") or {}).get("requires_python"),
     }
     d = job_dir(cfg, job_id)
     d.mkdir(parents=True, exist_ok=True)
@@ -361,10 +538,18 @@ def cmd_init(args, cfg) -> None:
                         "base_digest": digest},
         "annotation": ann,
         "entry": entry,
+        "command": command,
+        "entrypoint_source": entry_source,
+        # What the repo says to run, and how the annotation compares. If the
+        # annotation's entry was unusable the command above is already the
+        # repo's smoke example; `annotation_corrections` says so.
+        "examples": (ev.get("examples") or [])[:12],
+        "annotation_findings": findings,
+        "annotation_corrections": corrections,
         "draft_spec": spec.to_dict(),
-        "warning": (None if ann.get("entry_points") else
-                    "No entry point: this job cannot pass L2. Supply --annotation "
-                    "(a metadata-package/ dir or YAML), or expect ENTRYPOINT_UNKNOWN."),
+        "warning": (None if command else
+                    "No runnable entry point in the annotation or the repo: this job cannot "
+                    "pass L2. Supply --annotation, or expect ENTRYPOINT_UNKNOWN."),
         "next": ("Review the draft against specs/synthesis.md. Write the final spec "
                  f"with `envbuild spec --job-id {job_id} --set-spec FILE`, "
                  "then `envbuild attempt`."),
@@ -395,12 +580,59 @@ def _diff(old: str, new: str) -> str:
                                         "before", "after"))
 
 
+def charged_attempts(state) -> int:
+    """Attempts that count against the budget: infra-failed ones do not."""
+    return state["attempt"] - int(state.get("infra_retries") or 0)
+
+
+def budget_elapsed(state) -> float:
+    """Wall clock spent SEARCHING: net of time lost to the substrate and of time
+    the model's own example spent running at L3. spatio-flux's reproduction
+    runs ~13 min; two L3 attempts consumed the 20-min budget before the agent
+    could apply the one-line repair the classifier had already named. L3 is
+    bounded separately by `l3_timeout_s`."""
+    return (time.time() - state["started_at"]
+            - float(state.get("infra_seconds") or 0.0)
+            - float(state.get("l3_seconds") or 0.0))
+
+
+def l3_timeout_s(cfg, state) -> int:
+    """How long the example may run. L1/L2 are probes and share
+    `verify_timeout_s`; L3 executes the model's own example, which the
+    annotation may size (`entry_points[].expected_runtime_s`, honoured up to
+    `l3_timeout_max_s`) and otherwise gets `l3_timeout_s`. A fixed three-minute
+    L3 made TIMEOUT the modal verdict for simulation models."""
+    ann_eps = (state.get("annotation") or {}).get("entry_points") or []
+    declared = next((e.get("expected_runtime_s") for e in ann_eps
+                     if e.get("command") == state.get("command") and e.get("expected_runtime_s")), None)
+    default = cfg.getint("budgets", "l3_timeout_s")
+    mx = cfg.getint("budgets", "l3_timeout_max_s")
+    override = (state.get("spec") or {}).get("l3_timeout_s")
+    if override:
+        return min(int(override), mx)
+    if not declared:
+        return default
+    return min(int(float(declared) * 1.5) + 60, mx)
+
+
+def attempt_deadline_s(cfg) -> int:
+    """Ceiling for one attempt end to end: the build pod, two probe pods, the
+    L3 run at its maximum, and slack for scheduling, log fetch and registry
+    reads. The pods' own `activeDeadlineSeconds` bound the containers; this
+    bounds the *driver's* view of the attempt, so a 36 000 s row (seen once,
+    under the old local backend) is recorded as TIMEOUT rather than as whatever
+    the log said."""
+    return (cfg.getint("budgets", "build_timeout_s")
+            + 2 * cfg.getint("budgets", "verify_timeout_s")
+            + cfg.getint("budgets", "l3_timeout_max_s") + 180)
+
+
 def _budget_check(cfg, state) -> str | None:
     if state.get("closed"):
         return "job already closed; start a new one"
-    if state["attempt"] >= cfg.getint("budgets", "max_attempts"):
-        return f"attempt budget exhausted ({state['attempt']} attempts)"
-    elapsed = time.time() - state["started_at"]
+    if charged_attempts(state) >= cfg.getint("budgets", "max_attempts"):
+        return f"attempt budget exhausted ({charged_attempts(state)} attempts)"
+    elapsed = budget_elapsed(state)
     if elapsed > cfg.getfloat("budgets", "wall_clock_s"):
         return f"wall-clock budget exhausted ({elapsed:.0f}s)"
     return None
@@ -456,7 +688,8 @@ def cmd_attempt(args, cfg) -> None:
                                    state["entry"], state["command"],
                                    cfg.getint("budgets", "verify_timeout_s"),
                                    start=args.start,
-                                   expect_outputs=bool(state.get("expect_outputs")))
+                                   expect_outputs=bool(state.get("expect_outputs")),
+                                   l3_timeout_s=l3_timeout_s(cfg, state))
         except InfraError as exc:
             # This is what turned a working L0 into an `UNKNOWN` corpus row: the
             # substrate was unreachable, which says nothing about the model.
@@ -470,15 +703,35 @@ def cmd_attempt(args, cfg) -> None:
 
     reached = lad.reached if build.ok else "L0"
     ok = build.ok and lad.failed_at is None
+    duration = time.time() - started
 
     # ---- classify ------------------------------------------------------
     cls = None
     if not ok:
         cls = classify_mod.classify(stderr, rung=rung_failed,
                                     local_modules=state.get("local_modules") or (),
-                                    exit_code=exit_code)
+                                    exit_code=exit_code, mount=spec.mount.to_dict(),
+                                    install_mode=spec.install_mode,
+                                    requires_python=state.get("requires_python"),
+                                    l3_timeout_s=(lad.notes or {}).get("l3_timeout_s") if build.ok else None)
+        if duration > attempt_deadline_s(cfg) and cls.failure_class in ("UNKNOWN", "INFRA_UNAVAILABLE"):
+            # The attempt outlived every deadline it was given. Whatever the log
+            # says, the row must say TIMEOUT.
+            cls = classify_mod.Classification("TIMEOUT", classified_by="rule", rule="attempt_deadline",
+                                              evidence=f"attempt ran {duration:.0f}s > "
+                                                       f"{attempt_deadline_s(cfg)}s")
+            cls.routes_to = classify_mod.ROUTING["TIMEOUT"]
+    infra = bool(cls and cls.routes_to == "infra")
 
-    duration = time.time() - started
+    # ---- lockfile -------------------------------------------------------
+    # What the image actually contains, read by the L1 probe from inside it.
+    # The spec pins the base; this pins everything above it, and it is what a
+    # `verified` verdict refers to.
+    lock = (lad.notes or {}).get("lockfile") if build.ok else None
+    if lock:
+        (job_dir(cfg, state["job_id"]) / f"lockfile.a{attempt_no}.txt").write_text(
+            f"# {lock['format']} {lock['sha256']}\n" + "\n".join(lock["entries"]) + "\n")
+
     row = {
         "model_id": state["model_id"], "job_id": state["job_id"], "attempt": attempt_no,
         "install_mode": spec.install_mode, "base_image": spec.base_image,
@@ -489,9 +742,12 @@ def cmd_attempt(args, cfg) -> None:
         "failed_step_kind": build.failed_step_kind,
         "failed_step_field": build.failed_step_field,
         "error_signature": normalize.signature(stderr) if not ok else None,
-        "error_raw": (stderr or "")[-8000:] if not ok else "",
+        # Decoded before truncation: the tail of the *readable* log, not of a
+        # progress stream with the error base64-encoded somewhere in the middle.
+        "error_raw": logs_mod.tail(stderr, 8000) if not ok else "",
         "failure_class": cls.failure_class if cls else None,
         "classified_by": cls.classified_by if cls else None,
+        "classifier_rule": cls.rule if cls else None,
         "action_taken": None,                    # filled by the next `patch`
         "next_ladder": "L0" if not ok else "L4",
         "duration_s": round(duration, 2),
@@ -503,19 +759,77 @@ def cmd_attempt(args, cfg) -> None:
         "image_digest": build.image_digest,
         "outputs_written": outputs,
         "failed_rung": None if ok else rung_failed,
+        "lockfile_sha256": lock["sha256"] if lock else None,
+        "lockfile_format": lock["format"] if lock else None,
+        # What L3 actually ran and where it came from -- `annotation`,
+        # `repo_example` (the annotation's entry was unusable), or `agent`
+        # (SET_ENTRYPOINT). Success is defined against the repo's example, so
+        # this is what a verified verdict refers to.
+        "entrypoint_used": state.get("command") or None,
+        "entrypoint_source": state.get("entrypoint_source"),
+        "l3_timeout_s": (lad.notes or {}).get("l3_timeout_s") if build.ok else None,
+        # False when the substrate failed: the row is kept (the corpus should
+        # show how often infra fails) but it does not count against the budget
+        # and is not a model failure. Filter on it before reading histograms.
+        "charged": not infra,
+        "run": run_provenance(cfg),
     }
     record.append_attempt(cfg.get("paths", "outputs"), row)
+
+    if build.ok and (lad.notes or {}).get("l3_seconds"):
+        state["l3_seconds"] = float(state.get("l3_seconds") or 0.0) + float(lad.notes["l3_seconds"])
+        if ok and spec.l3_timeout_s:
+            # The example needed more than the smoke budget and then passed:
+            # the annotation should say how long it runs. Measured, not guessed.
+            observed = int(lad.notes["l3_seconds"])
+            state.setdefault("annotation_corrections", []).append({
+                "field": "entry_points[0].expected_runtime_s", "was": None, "now": observed,
+                "evidence": f"L3 killed at {cfg.getint('budgets', 'l3_timeout_s')} s; passed in {observed} s "
+                            f"with l3_timeout_s={spec.l3_timeout_s}",
+                "applied_by": "patch", "outcome": "verified"})
+
+    # ---- infra plane -----------------------------------------------------
+    if infra:
+        state["infra_retries"] = int(state.get("infra_retries") or 0) + 1
+        state["infra_seconds"] = float(state.get("infra_seconds") or 0.0) + duration
+        state["last"] = {"attempt": attempt_no, "reached": reached, "ok": False,
+                         "failure_class": cls.failure_class, "failed_rung": rung_failed,
+                         "image_ref": None, "image_digest": None, "infra": True}
+        # A retry re-runs the SAME spec: nothing about it is implicated.
+        state["patched_since_attempt"] = True
+        save_state(cfg, state)
+        retries_left = cfg.getint("budgets", "max_infra_retries") - state["infra_retries"]
+        if retries_left < 0:
+            _write_verdict(cfg, state, "error",
+                           f"infrastructure unavailable after {state['infra_retries']} retries: "
+                           f"{cls.evidence[:200]}")
+            die("infrastructure unavailable; job closed with an error verdict", code=4,
+                job_id=state["job_id"], verdict="error", classification=cls.to_dict())
+        emit({
+            "ok": False, "job_id": state["job_id"], "attempt": attempt_no,
+            "ladder_reached": reached, "failed_rung": rung_failed,
+            "classification": cls.to_dict(), "charged": False,
+            "infra_retries_left": retries_left,
+            "stderr_tail": logs_mod.tail(stderr, 2000),
+            "next": ("The SUBSTRATE failed (network, registry, package index, scheduling) -- "
+                     "not the spec. This attempt was not charged. Do NOT patch: no EnvSpec "
+                     "field is implicated. Wait a moment and re-run "
+                     f"`envbuild attempt --job-id {state['job_id']}` with the same spec."),
+        })
+        sys.exit(3)
 
     # ---- best-so-far ----------------------------------------------------
     best = state["best"]
     if ladder_mod.rung_index(reached) > ladder_mod.rung_index(best.get("rung") or ""):
         state["best"] = {"rung": reached, "spec": spec.to_dict(),
-                         "image_ref": build.image_ref, "image_digest": build.image_digest}
+                         "image_ref": build.image_ref, "image_digest": build.image_digest,
+                         "lockfile_sha256": lock["sha256"] if lock else None}
     state["last"] = {"attempt": attempt_no, "reached": reached, "ok": ok,
                      "failure_class": cls.failure_class if cls else None,
                      "failed_rung": None if ok else rung_failed,
                      "image_ref": build.image_ref, "image_digest": build.image_digest}
     state["patched_since_attempt"] = False
+    resolve_corrections(state, reached, ok, cls.failure_class if cls else None)
     save_state(cfg, state)
 
     out = {
@@ -528,10 +842,13 @@ def cmd_attempt(args, cfg) -> None:
         "vertices_total": build.vertices_total,
         "duration_s": row["duration_s"], "outputs_written": outputs,
         "error_signature": row["error_signature"],
-        "stderr_tail": (stderr or "")[-4000:],
-        "attempts_left": cfg.getint("budgets", "max_attempts") - attempt_no,
-        "seconds_left": round(cfg.getfloat("budgets", "wall_clock_s")
-                              - (time.time() - state["started_at"])),
+        "stderr_tail": logs_mod.tail(stderr, 4000),
+        "lockfile": {"format": lock["format"], "sha256": lock["sha256"],
+                     "entries": len(lock["entries"]),
+                     "file": str(job_dir(cfg, state["job_id"]) / f"lockfile.a{attempt_no}.txt")}
+                    if lock else None,
+        "attempts_left": cfg.getint("budgets", "max_attempts") - charged_attempts(state),
+        "seconds_left": round(cfg.getfloat("budgets", "wall_clock_s") - budget_elapsed(state)),
     }
     if ok:
         out["next"] = ("Verified through L3. Close the job with "
@@ -573,6 +890,36 @@ def cmd_patch(args, cfg) -> None:
             discarded={"action": args.action, "arg": args.arg})
 
     last = state.get("last") or {}
+    if last.get("infra"):
+        # Nothing about the spec is implicated by a substrate failure. The first
+        # corpus run spent 26 typed repairs on DNS outages.
+        die("the last attempt failed in the SUBSTRATE (INFRA_UNAVAILABLE), not in the spec. "
+            "There is nothing to patch; re-run `envbuild attempt` with the same spec.",
+            code=3, discarded={"action": args.action, "arg": args.arg})
+    if args.action == "ADD_PRE_INSTALL_CMD":
+        bad = patch_mod.forbidden_pre_install(args.arg or "")
+        if bad:
+            die(f"ADD_PRE_INSTALL_CMD refused: {bad}. Free shell is for environment "
+                f"preparation, not for making a probe pass. Fix the cause with a typed "
+                f"action, or close the job honestly.", code=3,
+                discarded={"action": args.action, "arg": args.arg})
+    if args.action == "SET_ENTRYPOINT":
+        # The builder may correct the annotation's entry point, but only to
+        # something the repo demonstrably contains, at most twice per job, and
+        # every change is recorded as a proposal against the annotation. After
+        # two, the honest answer is ENTRYPOINT_UNKNOWN -> submitter, with the
+        # findings attached.
+        why = examples_mod.grounded(state["repo"], args.arg or "", state.get("examples") or [],
+                                    code_path=state["spec"]["mount"]["code_path"])
+        if why:
+            die(f"SET_ENTRYPOINT refused: {why}", code=3,
+                examples=[e["command"] for e in (state.get("examples") or [])[:10]],
+                discarded={"action": args.action, "arg": args.arg})
+        if int(state.get("entrypoint_changes") or 0) >= 2:
+            die("SET_ENTRYPOINT refused: two entry-point changes already made in this job. "
+                "Close with --status failed (ENTRYPOINT_UNKNOWN); the findings and the "
+                "tried entries go back to the submitter.", code=3,
+                discarded={"action": args.action, "arg": args.arg})
     failure_class = args.failure_class or last.get("failure_class") or "UNKNOWN"
     triple = [failure_class, args.action, args.arg or ""]
     if triple in state["forbidden"]:
@@ -605,6 +952,26 @@ def cmd_patch(args, cfg) -> None:
     state["spec"] = result.spec.to_dict()
     state["forbidden"].append(triple)
     state["patched_since_attempt"] = True
+    if args.action == "SET_ENTRYPOINT":
+        # The entry lives in job state (L2 probe target + L3 command), not only
+        # in the spec's informational `entrypoint` field.
+        new_cmd = (args.arg or "").strip()
+        state.setdefault("annotation_corrections", []).append({
+            "field": "entry_points[0].command", "was": state.get("command"), "now": new_cmd,
+            "evidence": args.why or "agent", "applied_by": "agent", "outcome": "pending"})
+        state["command"] = new_cmd
+        state["entry"] = ladder_mod.entry_from_command(new_cmd)
+        state["entrypoint_source"] = "agent"
+        state["entrypoint_changes"] = int(state.get("entrypoint_changes") or 0) + 1
+        wd = examples_mod.derive_workdir(state["repo"],
+                                         state["entry"].get("value") if state["entry"].get("kind") == "file" else None)
+        if wd:
+            spec_d = state["spec"]
+            spec_d["mount"]["workdir"] = f"{spec_d['mount']['code_path']}/{wd}"
+            state["annotation_corrections"].append({
+                "field": "mount.workdir", "was": result.spec.mount.workdir, "now": spec_d["mount"]["workdir"],
+                "evidence": f"{state['entry']['value']} opens files relative to {wd}/",
+                "applied_by": "agent", "outcome": "pending"})
     save_state(cfg, state)
 
     # Backfill the action onto the attempt row it responds to: the record is
@@ -653,6 +1020,7 @@ def cmd_reverify(args, cfg) -> None:
     try:
         lad = ladder_mod.climb(verifier, ref, verifier.code_ref, spec, state["entry"],
                                state["command"], cfg.getint("budgets", "verify_timeout_s"),
+                               l3_timeout_s=l3_timeout_s(cfg, state),
                                start=args.start,
                                expect_outputs=bool(state.get("expect_outputs")))
     except InfraError as exc:
@@ -681,6 +1049,45 @@ def cmd_reverify(args, cfg) -> None:
 
 
 # ---------------------------------------------------------------- verdict
+def finalize_corrections(state: dict) -> list[dict]:
+    """Close the books: anything still pending at verdict time was never
+    exercised by a passing rung, and says so."""
+    out = []
+    for c in state.get("annotation_corrections") or []:
+        c = dict(c)
+        if c.get("outcome") == "pending":
+            c["outcome"] = "unverified"
+        out.append(c)
+    return out
+
+
+def write_annotation_patch(cfg, state, corrections: list[dict]) -> Path | None:
+    """`jobs/<job>/annotation-patch.yaml`: the corrections that a passing rung
+    accepted, as a diff against `metadata-package/execution.yaml` for
+    biomodel-annotator (or a human) to apply. The builder never edits the
+    annotation itself; it produces the evidence that lets someone else do so.
+    Only `verified` and `helped` corrections qualify -- a guess that did not
+    help is on the verdict row, not in the patch."""
+    accepted = [c for c in corrections if c.get("outcome") in ("verified", "helped")]
+    if not accepted:
+        return None
+    doc = {
+        "annotation_patch": {
+            "schema": "envbuild-annotation-patch/1",
+            "model_id": state["model_id"], "job_id": state["job_id"],
+            "code_revision": state.get("code_revision"),
+            "source": state.get("annotation_path"),
+            "changes": [{"field": c["field"], "was": c.get("was"), "now": c["now"],
+                         "evidence": c.get("evidence"), "outcome": c["outcome"]} for c in accepted],
+            "findings": state.get("annotation_findings") or [],
+        }
+    }
+    path = job_dir(cfg, state["job_id"]) / "annotation-patch.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    return path
+
+
 def _write_verdict(cfg, state, status: str, reason: str) -> dict:
     best = state.get("best") or {}
     last = state.get("last") or {}
@@ -700,7 +1107,24 @@ def _write_verdict(cfg, state, status: str, reason: str) -> dict:
         "reason": reason,
         "l4": None,                              # reference-trace comparison: Phase 0 never runs it
         "forbidden": state.get("forbidden"),
+        # The approval unit grows to (image digest, lockfile, code revision):
+        # the lockfile is what pins the layers the base digest does not.
+        "lockfile_sha256": best.get("lockfile_sha256"),
+        "infra_retries": int(state.get("infra_retries") or 0),
+        "charged_attempts": charged_attempts(state),
+        # duration_s is wall clock; this is the part spent building and probing.
+        "search_seconds": round(budget_elapsed(state), 2),
+        "l3_seconds": round(float(state.get("l3_seconds") or 0.0), 2),
+        "run": run_provenance(cfg),
+        # The repo-example success definition: what was run, where the command
+        # came from, and every correction the builder made to the annotation's
+        # reading of the repo -- with the outcome the ladder assigned it.
+        "entrypoint_used": state.get("command") or None,
+        "entrypoint_source": state.get("entrypoint_source"),
+        "annotation_findings": state.get("annotation_findings") or [],
+        "annotation_corrections": finalize_corrections(state),
     }
+    write_annotation_patch(cfg, state, row["annotation_corrections"])
     written = record.write_verdict(cfg.get("paths", "outputs"), row)
     state["closed"] = True
     save_state(cfg, state)
@@ -718,8 +1142,12 @@ def cmd_verdict(args, cfg) -> None:
         if not args.keep:
             make_verifier(cfg, state).cleanup(state["job_id"])
             make_builder(cfg, state).cleanup(state["job_id"])
+    patch_file = job_dir(cfg, state["job_id"]) / "annotation-patch.yaml"
     emit({"ok": True, "job_id": state["job_id"], "already_closed": bool(already),
-          "verdict": row, "torn_down": not args.keep})
+          "verdict": row, "torn_down": not args.keep,
+          # Proposed corrections to the annotation, for biomodel-annotator or a
+          # human to apply. Present only when a passing rung accepted one.
+          "annotation_patch": str(patch_file) if patch_file.exists() else None})
 
 
 def cmd_inspect(args, cfg) -> None:

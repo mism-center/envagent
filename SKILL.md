@@ -188,6 +188,7 @@ Read on demand, not up front:
 | `specs/remediation_actions.md` | Step 4, to pick an action and its argument |
 | `specs/base_selection.md` | when a base choice or `install_mode` looks wrong |
 | `specs/record_schema.md` | when reading `outputs/*.jsonl`, or answering the infra team |
+| `specs/success_criteria.md` | when the entry point looks wrong, before `SET_ENTRYPOINT`; when writing the verdict reason for a corrected job |
 
 ## Rules that are not negotiable
 
@@ -197,6 +198,23 @@ Read on demand, not up front:
 - **Never pass an existing Dockerfile through.** It is evidence, not a template.
 - **Never use a bare tag as a base.** Digest or nothing.
 - **One typed action per attempt**, with a `--why`.
+- **Never patch a substrate failure.** `INFRA_UNAVAILABLE` (`routes_to:
+  "infra"`, `charged: false`) means DNS, a registry or an index was down. The
+  attempt was not charged; re-run `envbuild attempt` with the same spec. The
+  driver refuses `patch` until a real attempt has run.
+- **`ADD_PRE_INSTALL_CMD` prepares the environment; it never makes a probe
+  pass.** Writing into `site-packages`, editing `/etc/hosts`, or installing a
+  package through the shell is refused. If the L1 probe is wrong about an
+  import name, that is a bug to report in the summary, not something to shim
+  around inside the image.
+- **Success is the repo's example running, not the annotation's entry.**
+  `init` prints `examples`, `annotation_findings` and the `command` it chose
+  (with `entrypoint_source`). If L2/L3 shows the chosen example is wrong,
+  `SET_ENTRYPOINT` to a listed example — grounded or it is refused, two per
+  job — and say why. Never invent an entry point. See `specs/success_criteria.md`.
+- **The lockfile is part of the result.** After L1 the attempt result carries
+  `lockfile` (what the image actually contains, hashed). Quote its `sha256` in
+  the verdict reason for a `verified` job.
 - **Every job ends in a verdict.** A job that ends without one is the single
   failure mode that corrupts the dataset.
 - **`ADD_PKG` on an L2 import failure requires justification.** If the missing

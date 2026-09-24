@@ -69,6 +69,19 @@ them over your priors about what a library needs.
 **`install_mode`** — take `base_choice.install_mode` unless you see stronger
 evidence. See `base_selection.md`.
 
+**`pkg_specs` and lockfiles** — if `evidence.lockfile` is set, `draft_spec`
+has already pinned the declared dependencies to the author's locked versions
+(`annotation_findings` carries `lockfile_honoured`). Keep those pins. Loosening
+one is a `UNPIN_PKG` repair with a reason, not a synthesis choice.
+
+**Undeclared imports** — `evidence.python.undeclared_imports` lists third-party
+modules the package's own code imports that no dependency list or lockfile
+provides (scripts/tests/examples are not scanned; imports available under
+another distribution name — `cv2` from `opencv-python` — are recognised).
+`draft_spec` appends them unpinned and `init` reports `undeclared_imports`.
+spatio-flux imports `xarray` inside `write_run_zarr` and declares it nowhere;
+the run found out 14 minutes into L3.
+
 **`env_vars`** — only what the model actually needs. `MPLBACKEND=Agg` for
 anything that plots (there is no display in a verification container).
 `PYTHONUNBUFFERED=1` if you want usable L3 logs. Do not set `PYTHONPATH` here —

@@ -46,6 +46,10 @@ fi
 PROVIDER_ARGS=()
 [ -n "$provider" ] && PROVIDER_ARGS=(--provider "$provider")
 echo "envbuild: provider=${provider:-<pi default>} model=${model}" >&2
+# The driver stamps these onto every attempt/verdict row as `run.agent_model`
+# and `run.agent_provider` -- so the RESOLVED values must be in the environment
+# the agent's shell inherits, not just in this script's locals.
+export AI_MODEL="$model" AI_PROVIDER="${provider:-pi-default}"
 
 run() {
   pi --approve --stream=all \

@@ -39,7 +39,8 @@ from pathlib import Path
 from typing import Protocol
 
 import k8s
-from envspec import EnvSpec, Step, render
+import logs as logtools
+from envspec import EnvSpec, Step, find_step_marker, render
 from errors import InfraError
 
 # Kaniko logs the literal rendered instruction on its own INFO line (color ANSI
@@ -94,8 +95,13 @@ class Builder(Protocol):
     def cleanup(self, job_id: str) -> None: ...
 
 
+_MARKER_PREFIX = re.compile(r"echo '::envbuild::step=\d+ kind=\w+ field=\w*' && ")
+
+
 def _norm(text: str) -> str:
-    return _WS.sub(" ", text).strip()
+    # Drop the step marker so an echo with or without it compares equal to
+    # the rendered instruction's payload.
+    return _MARKER_PREFIX.sub("", _WS.sub(" ", text).strip())
 
 
 def match_step(logged_instruction: str, steps: list[Step]) -> Step | None:
@@ -122,13 +128,30 @@ def match_step(logged_instruction: str, steps: list[Step]) -> Step | None:
 
 
 def match_kaniko_step(logs: str, steps: list[Step]) -> Step | None:
-    """Last rendered instruction Kaniko logged before the failure, mapped back to
-    the EnvSpec field that produced it."""
+    """The step that was executing when the build died, mapped back to the
+    EnvSpec field that produced it.
+
+    Two sources, in order of trust. First the explicit marker every rendered RUN
+    prints (`::envbuild::step=N ...`): the last one in the log is the step that
+    did not finish, and matching it is an integer lookup that works under any
+    executor and any log format. Then, for a build that died before its first
+    RUN or under an executor that swallows stdout, the instruction Kaniko echoed
+    before the failure, prefix-matched against the rendered steps.
+    """
+    text = logtools.decode(logs)
+    hit = find_step_marker(text)
+    if hit is not None:
+        idx = hit[0]
+        if 0 <= idx < len(steps):
+            return steps[idx]
     last_text = None
-    for raw in logs.splitlines():
-        m = _KANIKO_LOG_LINE.match(_ANSI.sub("", raw).strip())
+    for raw in text.splitlines():
+        m = _KANIKO_LOG_LINE.match(raw.strip())
         if m and _INSTRUCTION.match(m.group(1)):
             last_text = m.group(1)
+        elif _INSTRUCTION.match(raw.strip()):
+            # decode() already stripped the INFO[..] prefix
+            last_text = raw.strip()
     if not last_text:
         return None
     return match_step(last_text, steps)
@@ -142,10 +165,19 @@ class K8sBuilder:
                  models_pvc: str = "", models_mount: str = "",
                  kaniko_image: str = "gcr.io/kaniko-project/executor:v1.23.2",
                  docker_config_secret: str = "envbuild-registry-auth",
-                 insecure_registry: bool = False, flat_registry: bool = False):
+                 insecure_registry: bool = False, flat_registry: bool = False,
+                 cache_repo: str = "", labels: dict[str, str] | None = None):
         self.job_id = job_id
         self.client = client
         self.registry = registry.rstrip("/")
+        # Kaniko layer cache. Keyed by instruction text + parent layer digest,
+        # so it is safe to share across jobs: two specs with the same apt layer
+        # on the same base reuse it, and a changed pkg line misses. Empty = off
+        # (the Phase 0 default -- correctness first).
+        self.cache_repo = cache_repo.rstrip("/")
+        # OCI labels stamped on every image this builder pushes (model id, code
+        # revision) -- what the driver knows and the registry otherwise forgets.
+        self.labels = dict(labels or {})
         self.work_pvc = work_pvc
         self.work_mount = Path(work_mount)
         self.models_pvc = models_pvc
@@ -202,8 +234,11 @@ class K8sBuilder:
             f"--context=dir://{context}",
             f"--destination={name}",
             f"--digest-file={_POD_WORK}/digest.txt",
-            "--cache=false",   # Phase 0: correctness first, cache export is a later win
         ]
+        if self.cache_repo:
+            args += ["--cache=true", f"--cache-repo={self.cache_repo}", "--cache-copy-layers=false"]
+        else:
+            args += ["--cache=false"]
         if self.insecure:
             args += ["--insecure", "--insecure-pull", "--skip-tls-verify",
                      "--skip-tls-verify-pull"]
@@ -250,7 +285,10 @@ class K8sBuilder:
     # -- Builder protocol ------------------------------------------------
     def build(self, spec: EnvSpec, context_dir: str, timeout_s: int) -> BuildResult:
         self.attempt += 1
-        rendered = render(spec)
+        rendered = render(spec, labels={"io.envbuild.job": self.job_id,
+                                        "io.envbuild.attempt": str(self.attempt),
+                                        "io.envbuild.envspec_hash": spec.hash(),
+                                        **self.labels})
         scratch = self._scratch()
         scratch.mkdir(parents=True, exist_ok=True)
         (scratch / "Dockerfile").write_text(rendered.text)
@@ -289,19 +327,22 @@ class K8sBuilder:
                                    image_bytes=None, stderr="", duration_s=duration,
                                    dockerfile=rendered.text)
 
+            # Decode BEFORE truncating. Cutting the raw stream first is how the
+            # first corpus run lost the real error under progress noise.
+            text = logtools.decode(logs)
             if exit_code is None:
                 # Never ran: a deadline, a pull failure, a scheduling refusal.
                 # Real build failures always produce an exit code.
-                return BuildResult(ok=False, stderr=f"{note}\n{logs[-4000:]}".strip(),
+                return BuildResult(ok=False, stderr=f"{note}\n{text[-4000:]}".strip(),
                                    duration_s=duration, dockerfile=rendered.text)
 
-            step = match_kaniko_step(logs, rendered.steps)
+            step = match_kaniko_step(text, rendered.steps)
             return BuildResult(
                 ok=False,
                 failed_step_index=step.index if step else None,
                 failed_step_kind=step.kind if step else None,
                 failed_step_field=step.field if step else None,
-                stderr=logs[-20000:], duration_s=duration,
+                stderr=text[-20000:], duration_s=duration,
                 dockerfile=rendered.text,
             )
         finally:
