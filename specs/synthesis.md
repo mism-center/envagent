@@ -69,14 +69,31 @@ them over your priors about what a library needs.
 **`install_mode`** — take `base_choice.install_mode` unless you see stronger
 evidence. See `base_selection.md`.
 
+**`pkg_specs` and lockfiles** — if `evidence.lockfile` is set, `draft_spec`
+has already pinned the declared dependencies to the author's locked versions
+(`annotation_findings` carries `lockfile_honoured`). Keep those pins. Loosening
+one is a `UNPIN_PKG` repair with a reason, not a synthesis choice.
+
+**Undeclared imports** — `evidence.python.undeclared_imports` lists third-party
+modules the package's own code imports that no dependency list or lockfile
+provides (scripts/tests/examples are not scanned; imports available under
+another distribution name — `cv2` from `opencv-python` — are recognised).
+`draft_spec` appends them unpinned and `init` reports `undeclared_imports`.
+spatio-flux imports `xarray` inside `write_run_zarr` and declares it nowhere;
+the run found out 14 minutes into L3.
+
 **`env_vars`** — only what the model actually needs. `MPLBACKEND=Agg` for
 anything that plots (there is no display in a verification container).
 `PYTHONUNBUFFERED=1` if you want usable L3 logs. Do not set `PYTHONPATH` here —
 use `mount.extra_path`, which renders into the right variable per language.
 
-**`mount`** — leave the defaults alone unless the annotation says otherwise. For
-a `src/` layout, set `extra_path: ["/model/src"]` up front rather than waiting
-for the L2 failure.
+**`mount`** — `draft_spec` already seeds `extra_path` from every local package
+`evidence.local_module_paths` found (root-level and `src/`-layout both), so the
+common case arrives pre-fixed; leave it alone unless you have stronger
+evidence. It only knows about a package directly under repo root or under
+`src/` — if the entry point needs some other container directory (a `lib/`
+convention, a nested namespace package, a monorepo subpackage), add it
+yourself rather than waiting for the L2 failure to rediscover it.
 
 **`entrypoint`** — record the annotation's command. It is *not* baked into the
 image in mounted mode; it is supplied at run time. Recording it is what lets the

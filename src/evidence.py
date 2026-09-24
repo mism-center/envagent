@@ -1,5 +1,4 @@
-"""Non-LLM repo scan -> evidence.json, plus the annotation-YAML reader and the
-context/code tar builder.
+"""Non-LLM repo scan -> evidence.json, plus the annotation-YAML reader.
 
 Everything here is deterministic: no model call, no network. The output is the
 sole input to base selection and the main input to spec synthesis, so it needs
@@ -12,15 +11,15 @@ in most repos.
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import re
-import tarfile
 import tomllib
 from pathlib import Path
 
 import yaml
+
+import examples as examples_mod
 
 # Files whose mere presence tells us something. Kept flat so the scan is one pass.
 MARKERS = [
@@ -33,8 +32,8 @@ MARKERS = [
     "Snakefile", "nextflow.config", "manifest.xml",
 ]
 
-# Never tarred: VCS metadata, caches, virtualenvs, and the result dirs that make
-# a 3 MB repo into a 900 MB context.
+# Never scanned: VCS metadata, caches, virtualenvs, and the result dirs that
+# make a 3 MB repo look like a 900 MB one.
 IGNORE_DIRS = {
     ".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache",
     ".ruff_cache", ".tox", ".venv", "venv", "env", "node_modules", ".ipynb_checkpoints",
@@ -98,6 +97,125 @@ def _parse_requirements(text: str) -> list[str]:
         if m:
             deps.append(m.group(1).strip())
     return deps
+
+
+def _undeclared_imports(root: Path, files: list[str], declared: list[str], lock: dict | None) -> dict:
+    """{module: pypi distribution} for third-party imports inside the repo's own
+    importable packages (directories with `__init__.py`; tests excluded) that
+    no declared dependency and no lockfile entry provides. Scripts, notebooks
+    and examples are not scanned: their imports are optional by nature
+    (`scripts/ec2_cluster.py` importing boto3 is not a model dependency).
+    Module -> distribution uses classify.MODULE_PYPI, falling back to the name.
+    """
+    import ast
+    import sys as _sys
+    from classify import MODULE_PYPI
+    stdlib = set(getattr(_sys, "stdlib_module_names", ()))
+    norm = lambda n: re.sub(r"[-_.]+", "-", n).lower()
+    have = {norm(re.split(r"[\[<>=!~;\s@]", d, 1)[0]) for d in declared if d}
+    if lock and lock.get("versions"):
+        have |= {norm(k) for k in lock["versions"]}
+    files = [Path(f).as_posix() for f in files]          # host scan may carry backslashes
+    pkg_dirs = {str(Path(f).parent.as_posix()) for f in files if Path(f).name == "__init__.py"}
+    pkg_dirs = {d for d in pkg_dirs if not re.search(r"(^|/)(tests?|testing|examples?|docs?|scripts?)(/|$)", d)}
+    # Anything importable from the repo root is local: package dirs, plain
+    # top-level dirs (`from scripts.x import ...`), top-level modules.
+    local = ({Path(d).name for d in pkg_dirs}
+             | {f.split("/")[0] for f in files if "/" in f}
+             | {Path(f).stem for f in files if Path(f).suffix == ".py" and "/" not in f})
+    # Modules the declared/locked distributions provide under another name
+    # (cv2 <- opencv-python OR opencv-python-headless; PIL <- pillow; yaml <- pyyaml).
+    provided = set()
+    for mod, dist in MODULE_PYPI.items():
+        if norm(dist) in have:
+            provided.add(mod)
+    if any(h.startswith("opencv-") for h in have):
+        provided.add("cv2")
+    out: dict[str, str] = {}
+    for f in files:
+        if not f.endswith(".py") or not any(f.startswith(d + "/") for d in pkg_dirs):
+            continue
+        if re.search(r"(^|/)(tests?|conftest)", f):
+            continue
+        try:
+            tree = ast.parse(_read(root / f))
+        except (SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names = [node.module]
+            else:
+                continue
+            for n in names:
+                top = n.split(".")[0]
+                if top in stdlib or top in local or top in provided or top.startswith("_"):
+                    continue
+                dist = MODULE_PYPI.get(top, top)
+                if norm(dist) not in have and norm(top) not in have:
+                    out[top] = dist
+    return out
+
+
+def _norm_name(n: str) -> str:
+    return re.sub(r"[-_.]+", "-", n).lower()
+
+
+def _parse_lockfile(root: Path) -> dict | None:
+    """First lockfile found -> {"kind", "file", "versions": {normalised name: version}}.
+
+    uv.lock / poetry.lock (TOML `[[package]]`), Pipfile.lock (JSON), and a
+    requirements.txt whose every line is `==`-pinned (pip-compile output).
+    renv.lock is reported but not used for pinning yet: R installs need
+    `remotes::install_version`, which the renderer does not emit.
+    """
+    def full(path, cap=8 * 1024 * 1024):
+        # `_read` caps at 200 KB for scan speed; a uv.lock is routinely bigger
+        # and a truncated TOML parses as nothing.
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")[:cap]
+        except OSError:
+            return ""
+
+    def toml_packages(path):
+        try:
+            data = tomllib.loads(full(path))
+        except Exception:
+            return None
+        return {_norm_name(p["name"]): str(p["version"]) for p in data.get("package", [])
+                if isinstance(p, dict) and p.get("name") and p.get("version")}
+
+    for name in ("uv.lock", "poetry.lock"):
+        if (root / name).exists():
+            v = toml_packages(root / name)
+            if v:
+                return {"kind": name.split(".")[0], "file": name, "versions": v}
+    if (root / "Pipfile.lock").exists():
+        try:
+            data = json.loads(full(root / "Pipfile.lock"))
+            v = {_norm_name(k): str(spec.get("version", "")).lstrip("=")
+                 for sec in ("default", "develop") for k, spec in (data.get(sec) or {}).items()
+                 if isinstance(spec, dict) and spec.get("version")}
+            if v:
+                return {"kind": "pipfile", "file": "Pipfile.lock", "versions": v}
+        except Exception:
+            pass
+    for req in sorted(root.glob("requirements*.txt")):
+        lines = [ln.split("#")[0].strip() for ln in _read(req).splitlines()]
+        lines = [ln for ln in lines if ln and not ln.startswith("-")]
+        if lines and all("==" in ln for ln in lines):
+            v = {_norm_name(re.split(r"[\[=<>!~;\s]", ln, 1)[0]): ln.split("==", 1)[1].split(";")[0].strip()
+                 for ln in lines}
+            return {"kind": "requirements-pinned", "file": req.name, "versions": v}
+    if (root / "renv.lock").exists():
+        try:
+            data = json.loads(full(root / "renv.lock"))
+            v = {k: str(p.get("Version")) for k, p in (data.get("Packages") or {}).items() if p.get("Version")}
+            return {"kind": "renv", "file": "renv.lock", "versions": v, "usable": False}
+        except Exception:
+            pass
+    return None
 
 
 def _parse_pyproject(path: Path) -> dict:
@@ -197,24 +315,38 @@ def _parse_ci(root: Path) -> list[dict]:
     return out
 
 
-def _local_modules(root: Path) -> list[str]:
-    """Top-level importable names the repo itself defines.
+def _local_modules(root: Path) -> dict[str, tuple[str, bool]]:
+    """Top-level importable names the repo itself defines, mapped to
+    (containing directory relative to repo root -- "" means root itself, is a
+    real package).
 
     This is what stops the loop from "fixing" an IMPORT_PATH_ERROR by installing
-    a same-named package off PyPI (see classify.module_not_found).
+    a same-named package off PyPI (see classify.module_not_found) -- and, since
+    it now records *where* a module lives and not just *that* it exists, what
+    lets a mount-path repair be computed instead of guessed one repo at a time
+    (see driver.draft_spec). A flat layout (the module directly under root) and
+    a `src/` layout need different fixes; this is the one scan that knows which.
+
+    The package flag matters because only a package is something an entry file
+    can be *nested inside of* -- a bare top-level script never needs its own
+    directory added to the path on its behalf, it's already wherever it is.
     """
-    mods = set()
-    for base in (root, root / "src"):
+    mods: dict[str, tuple[str, bool]] = {}
+    for rel in ("", "src"):
+        base = root / rel if rel else root
         if not base.is_dir():
             continue
         for child in base.iterdir():
             if child.name in IGNORE_DIRS or child.name.startswith("."):
                 continue
+            name, is_pkg = None, False
             if child.is_dir() and (child / "__init__.py").exists():
-                mods.add(child.name)
+                name, is_pkg = child.name, True
             elif child.suffix == ".py" and child.stem != "setup":
-                mods.add(child.stem)
-    return sorted(mods)
+                name, is_pkg = child.stem, False
+            if name and name not in mods:      # first hit wins: root before src/
+                mods[name] = (rel, is_pkg)
+    return mods
 
 
 def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
@@ -225,6 +357,7 @@ def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
         files.append(str(rel))
         total += size
 
+    local_mods = _local_modules(root)
     ev: dict = {
         "root": str(root),
         "file_count": len(files),
@@ -234,7 +367,8 @@ def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
         "top_level": sorted({f.split("/")[0] for f in files})[:80],
         "markers": {m: m for m in MARKERS if (root / m).exists()},
         "languages": {},
-        "local_modules": _local_modules(root),
+        "local_modules": sorted(local_mods),
+        "local_module_paths": {n: rel for n, (rel, is_pkg) in local_mods.items() if is_pkg},
         "python": {}, "r": {}, "julia": {}, "conda": {},
         "system_hints": {"apt": [], "from_dockerfile": [], "from_ci": []},
         "ci": _parse_ci(root),
@@ -269,6 +403,12 @@ def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
             py["declared_deps"].extend(re.findall(r"['\"]([^'\"]+)['\"]", m.group(1)))
     py["declared_deps"] = sorted(set(py["declared_deps"]))
     ev["python"] = py
+    # The author's own resolution, when they committed one. spatio-flux shipped
+    # a uv.lock pinning process-bigraph 1.4.12; three passes resolved 1.8.4 and
+    # died on the API drift. A lockfile is the highest-value dependency evidence
+    # a repo can carry -- higher than requirements.txt, which is aspiration.
+    ev["lockfile"] = _parse_lockfile(root)
+    py["undeclared_imports"] = _undeclared_imports(root, files, py["declared_deps"], ev["lockfile"])
 
     # ---- conda / R / julia ----
     for name in ("environment.yml", "environment.yaml", "conda.yaml"):
@@ -296,6 +436,17 @@ def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
         "makefile": (root / "Makefile").exists(),
         "cmake": (root / "CMakeLists.txt").exists(),
         "editable_hint": bool(re.search(r"pip install\s+-e", setup_py + _read(root / "README.md"))),
+        # The README's install line installs the PROJECT, not just its deps:
+        # `pip install .`, `pip install -e .`, `uv sync`/`uv run` (which sync the
+        # project into the venv), `poetry install`, `flit install`. A repo that
+        # documents this often relies on being installed -- spatio-flux's
+        # `allocate_core()` discovers processes over installed distributions and
+        # finds nothing in mounted mode.
+        "project_install_hint": bool(re.search(
+            r"pip install\s+(?:-e\s+)?\.(?:\[|\s|$)|\buv (?:sync|run)\b|\bpoetry install\b|\bflit install\b|"
+            r"\bpdm install\b|\bhatch (?:run|env create)\b",
+            _read(root / "README.md") + _read(root / "README.rst"), re.M)) and (
+            (root / "pyproject.toml").exists() or (root / "setup.py").exists()),
     }
 
     # ---- entrypoint candidates (structural, not documented) ----
@@ -322,6 +473,11 @@ def scan(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> dict:
         ev["system_hints"]["from_ci"].extend(ci["apt"])
     ev["system_hints"]["apt"] = sorted(set(ev["system_hints"]["from_dockerfile"]
                                            + ev["system_hints"]["from_ci"]))
+
+    # ---- what the repo itself says to run (README, tests, example dirs, CI) ----
+    # This is the ground the annotation's entry points are checked against, and
+    # the only thing SET_ENTRYPOINT may point at. See examples.py.
+    ev["examples"] = examples_mod.discover(root, files, ev["ci"], ev["entrypoint_candidates"])
     return ev
 
 
@@ -386,6 +542,34 @@ def language_version(lang) -> str | None:
     return _unwrap(lang.get("version_constraint")) or _unwrap(lang.get("version"))
 
 
+_RUNTIME_UNIT_S = {"s": 1, "sec": 1, "second": 1, "seconds": 1, "min": 60, "minute": 60, "minutes": 60,
+                   "h": 3600, "hr": 3600, "hour": 3600, "hours": 3600, "d": 86400, "day": 86400, "days": 86400}
+
+
+def typical_runtime_s(field) -> float | None:
+    """`compute.typical_runtime` -> seconds. Accepts {value, unit}, a bare
+    number (seconds), or "15 min"/"2 hours"; None when absent or unparseable."""
+    if isinstance(field, dict):
+        # Before _unwrap: the annotation's {value, unit, source} wrapper would
+        # otherwise collapse to the bare number and lose the unit.
+        val, unit = _unwrap(field.get("value")), (_unwrap(field.get("unit")) or "s")
+        if val in (None, ""):
+            return None
+        try:
+            return float(val) * _RUNTIME_UNIT_S.get(str(unit).lower().rstrip("."), 1)
+        except (TypeError, ValueError):
+            return None
+    field = _unwrap(field)
+    if field in (None, ""):
+        return None
+    if isinstance(field, (int, float)):
+        return float(field)
+    m = re.match(r"\s*([\d.]+)\s*([a-zA-Z]*)", str(field))
+    if not m:
+        return None
+    return float(m.group(1)) * _RUNTIME_UNIT_S.get(m.group(2).lower() or "s", 1)
+
+
 def read_annotation(path: str | Path) -> dict:
     """-> {language, language_version, declared_deps, system_deps, entry_points,
            expected_inputs, expected_outputs}. Missing keys come back empty."""
@@ -404,15 +588,23 @@ def read_annotation(path: str | Path) -> dict:
     ex = merged.get("execution") or {}
     io_ = merged.get("io") or {}
     runtime_deps, system_deps = annotation_deps(ex)
+    # The annotation states runtime once, at model level, as
+    # `execution.compute.typical_runtime: {value, unit}`. The driver sizes L3
+    # per entry point (`expected_runtime_s`), so map it onto every entry that
+    # does not carry its own. Until rev 4.7 nothing read either field, so no
+    # annotated runtime ever reached the L3 deadline.
+    typical = typical_runtime_s((ex.get("compute") or {}).get("typical_runtime"))
     entries = []
     for e in _unwrap(ex.get("entry_points")) or []:
         if not isinstance(e, dict):
             continue
+        own = _unwrap(e.get("expected_runtime_s"))
         entries.append({
             "name": _unwrap(e.get("name")),
             "command": _unwrap(e.get("command")),
             "arguments": _unwrap(e.get("arguments")) or [],
             "default_output_location": _unwrap(e.get("default_output_location")),
+            "expected_runtime_s": float(own) if own not in (None, "") else typical,
         })
     return {
         "model_name": _unwrap((merged.get("model") or {}).get("name")),
@@ -428,26 +620,6 @@ def read_annotation(path: str | Path) -> dict:
 
 
 # --------------------------------------------------------------------------
-def make_tar(root: str | Path, max_bytes: int = 256 * 1024 * 1024) -> bytes:
-    """Tar the repo (ignore list applied) for the build context and code volume.
-
-    Hard ceiling, because a repo carrying hundreds of MB of result data will
-    otherwise silently make every attempt slow and every cache useless.
-    """
-    root = Path(root).resolve()
-    buf = io.BytesIO()
-    total = 0
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        for rel, size in sorted(_walk(root)):
-            total += size
-            if total > max_bytes:
-                raise ValueError(
-                    f"context exceeds {max_bytes} bytes at {rel}; "
-                    "extend evidence.IGNORE_DIRS or raise budgets.max_context_bytes")
-            tar.add(root / rel, arcname=str(rel), recursive=False)
-    return buf.getvalue()
-
-
 if __name__ == "__main__":          # `python evidence.py <repo>` -> evidence.json
     import sys
     print(json.dumps(scan(sys.argv[1]), indent=2))

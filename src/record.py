@@ -24,11 +24,18 @@ ATTEMPT_REQUIRED = (
     "error_signature", "error_raw", "failure_class", "classified_by",
     "action_taken", "next_ladder",
     "duration_s", "image_bytes", "cache_hits", "tokens",
+    # rev 3: which run produced the row, whether it counts against the budget,
+    # and what the image actually contained when it passed L1.
+    "run", "charged", "lockfile_sha256",
+    # rev 4: what L3 ran and where the command came from.
+    "entrypoint_used", "entrypoint_source",
 )
 VERDICT_REQUIRED = (
     "model_id", "job_id", "status", "ladder_reached", "attempts",
     "image_digest", "code_revision", "envspec_hash", "failure_class",
     "routes_to", "duration_s", "ended_at", "reason",
+    "run", "charged_attempts", "lockfile_sha256",
+    "entrypoint_used", "entrypoint_source", "annotation_corrections",
 )
 
 VALID_STATUS = ("verified", "failed", "escalated", "budget_exhausted", "error")

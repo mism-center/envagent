@@ -17,6 +17,7 @@ import copy
 import dataclasses
 import hashlib
 import json
+import re
 import shlex
 from dataclasses import dataclass, field
 from typing import Literal, NamedTuple
@@ -46,13 +47,47 @@ _PKG_CACHE = {
     "renv": _R_DOWNLOAD_DIR,
     "pkg": _R_DOWNLOAD_DIR,
 }
+# PINNED ON PURPOSE, like kaniko_image in config.ini. An unpinned
+# `pip install --upgrade pip setuptools wheel` is the one layer above FROM that
+# changed underneath every build in the first corpus run: the base was
+# digest-pinned and then immediately un-pinned by its own bootstrap. Old enough
+# to run on python:3.8 images, new enough to read current wheel metadata. Bump
+# deliberately, between corpus runs, and expect signatures to move.
+BOOTSTRAP_PINS = ("pip==24.0", "setuptools==69.5.1", "wheel==0.43.0")
 _BOOTSTRAP = {
-    "pip": "python -m pip install --upgrade pip setuptools wheel",
+    "pip": "python -m pip install --no-cache-dir --upgrade " + " ".join(BOOTSTRAP_PINS),
     "conda": None,   # base image ships conda
     "mamba": None,   # micromamba image ships mamba
     "renv": None,    # rocker images ship R
     "pkg": None,
 }
+# Container hygiene the spec author should not have to remember. Merged under
+# the spec's own env_vars (the spec wins), so a repair can still override one.
+_HYGIENE_ENV = {
+    "pip": {"PIP_NO_CACHE_DIR": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "PYTHONDONTWRITEBYTECODE": "1"},
+    "conda": {"PYTHONDONTWRITEBYTECODE": "1"},
+    "mamba": {"PYTHONDONTWRITEBYTECODE": "1"},
+    "renv": {},
+    "pkg": {},
+}
+
+# Every RUN starts by printing this marker. Kaniko echoes the instruction, and
+# the command echoes the marker; either way the *last* marker in the log before
+# the failure names the step, by index, with no prefix-matching heuristics.
+# `failed_step_index` was populated on 10 of 101 L0 failures when it depended on
+# matching the instruction text alone.
+STEP_MARKER = "::envbuild::step={index} kind={kind} field={field}"
+_STEP_MARKER_RE = re.compile(r"::envbuild::step=(\d+) kind=(\w+) field=(\w*)")
+
+
+def find_step_marker(logs: str) -> tuple[int, str, str] | None:
+    """Last step marker in a build log -> (index, kind, field), or None."""
+    hits = _STEP_MARKER_RE.findall(logs or "")
+    if not hits:
+        return None
+    idx, kind, field_ = hits[-1]
+    return int(idx), kind, field_
 # Which env var carries MountContract.extra_path for this manager.
 _PATH_VAR = {
     "pip": "PYTHONPATH",
@@ -77,6 +112,12 @@ class MountContract:
     output_path: str = "/outputs"
     workdir: str = "/model"
     extra_path: tuple[str, ...] = ()      # PYTHONPATH / R_LIBS additions
+    # L3 runs against a writable COPY of the code (`/scratch<code_path>`)
+    # instead of the read-only mount. For models that read AND write
+    # cwd-relative paths (`./investigations/x.yaml` in, `report/` out) no
+    # workdir/output_path choice satisfies both; a working copy does. The
+    # image and the approval unit are unchanged -- this is a run-time contract.
+    writable_copy: bool = False
 
     def to_dict(self) -> dict:
         d = dataclasses.asdict(self)
@@ -87,6 +128,7 @@ class MountContract:
     def from_dict(d: dict) -> "MountContract":
         d = dict(d or {})
         d["extra_path"] = tuple(d.get("extra_path") or ())
+        d["writable_copy"] = bool(d.get("writable_copy", False))
         return MountContract(**d)
 
 
@@ -107,6 +149,11 @@ class EnvSpec:
     mount: MountContract = field(default_factory=MountContract)
     entrypoint: list[str] = field(default_factory=list)  # recorded; not baked when mounted
     builder_version: str = "unknown"
+    # How long L3 may run, when the agent has had to extend it (SET_L3_TIMEOUT).
+    # None -> the driver's default / the annotation's expected_runtime_s. A
+    # run-time contract like `mount`; the renderer never reads it, but it is
+    # part of the spec so the attempt that carries it hashes differently.
+    l3_timeout_s: int | None = None
 
     # ---- serialisation -------------------------------------------------
     def to_dict(self) -> dict:
@@ -119,7 +166,20 @@ class EnvSpec:
         d = dict(d)
         d["mount"] = MountContract.from_dict(d.get("mount"))
         known = {f.name for f in dataclasses.fields(EnvSpec)}
-        return EnvSpec(**{k: v for k, v in d.items() if k in known})
+        spec = EnvSpec(**{k: v for k, v in d.items() if k in known})
+        # base_digest is agent-supplied on every patch, and a mistyped one is
+        # only caught by the builder -- after a whole attempt has been paid for.
+        # Seen twice in the AKS corpus run as a 65-character digest: Kaniko
+        # reports `could not parse reference`, which classifies as UNKNOWN,
+        # which spends a repair on a typo. Fail here instead -- it is a trust
+        # boundary and the check is one regex.
+        if spec.base_digest and not _DIGEST_RE.fullmatch(spec.base_digest):
+            raise ValueError(
+                f"base_digest is not a sha256 digest: {spec.base_digest!r} "
+                f"(expected sha256: plus exactly 64 hex characters, got "
+                f"{len(spec.base_digest.split(':')[-1])}). Leave base_digest empty "
+                f"to have it resolved from base_image instead of typing it out.")
+        return spec
 
     def copy(self) -> "EnvSpec":
         """Deep copy. patch.py mutates the copy so the previous attempt's spec
@@ -140,8 +200,9 @@ class EnvSpec:
 class Step(NamedTuple):
     """One rendered Dockerfile instruction, tagged with its originating field.
 
-    `index` is 0-based over the rendered instructions; builder.py maps a failing
-    BuildKit vertex back onto it, which is what makes `failed_step_kind` free.
+    `index` is 0-based over the rendered instructions; builder.py maps the
+    instruction Kaniko echoed before it died back onto it, which is what makes
+    `failed_step_kind` free.
     """
 
     index: int
@@ -152,28 +213,50 @@ class Step(NamedTuple):
     instruction: str   # the rendered text, used for vertex matching
 
 
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+
 class RenderedDockerfile(NamedTuple):
     text: str
     steps: list[Step]
 
 
-def _heredoc(lines: list[str]) -> str:
-    """Multi-command RUN as a quoted heredoc -- readable in generated output,
-    and no shell interpolation of anything the LLM wrote."""
-    body = "\n".join(["set -eux"] + lines)
-    return f"RUN <<'ENVBUILD'\n{body}\nENVBUILD"
+def _run_script(lines: list[str]) -> str:
+    r"""Multi-command RUN, joined with `&&` across continuation lines.
+
+    NOT a heredoc (`RUN <<'ENVBUILD'`), which is what this used to emit. Heredoc
+    RUN is BuildKit-only syntax: Kaniko does not implement it and runs the
+    *delimiter* as the command --
+
+        INFO RUN <<'ENVBUILD'
+        INFO Args: [-c <<'ENVBUILD']
+        INFO No files were changed, appending empty layer to config.
+
+    -- so the step silently succeeds having done nothing. pre_install and
+    post_install are both rendered here, which meant the whole
+    ADD_PRE_INSTALL_CMD / ADD_POST_INSTALL_CMD repair vocabulary was a no-op
+    that reported success on that backend, and the repair loop then spent its
+    budget re-diagnosing a failure its own (correct) repair had never been
+    allowed to fix. `&&` runs everywhere.
+
+    Embedded newlines are split into separate commands rather than passed
+    through: the heredoc form tolerated them, a single RUN line does not.
+    """
+    cmds = [ln.strip() for raw in lines for ln in raw.splitlines() if ln.strip()]
+    body = " \\\n && ".join(["set -eux"] + cmds)
+    return f"RUN {body}"
 
 
 def _apt_run(packages: list[str]) -> str:
+    """One apt layer. No `--mount=type=cache`: that is BuildKit-only syntax and
+    Kaniko ignores it, so the package lists landed in the image layer anyway --
+    deleting them explicitly is what the mount was pretending to do."""
     pkgs = " \\\n      ".join(packages)
     return (
-        "RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n"
-        "    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n"
-        # apt's docker-clean hook deletes the very cache we just mounted.
-        "    rm -f /etc/apt/apt.conf.d/docker-clean \\\n"
-        " && apt-get update \\\n"
+        "RUN apt-get update \\\n"
         " && apt-get install -y --no-install-recommends \\\n"
-        f"      {pkgs}"
+        f"      {pkgs} \\\n"
+        " && rm -rf /var/lib/apt/lists/*"
     )
 
 
@@ -211,10 +294,19 @@ def _install_cmd(manager: str, specs: list[str]) -> str:
 
 
 def _run_with_cache(cache: str | None, command: str) -> str:
-    r"""`RUN <cmd>`, or `RUN --mount=... \` + indented cmd when there is a cache."""
+    r"""`RUN <cmd>`, preceded by `mkdir -p` of the package manager's cache dir.
+
+    The `mkdir -p` is the whole point. Nothing creates that directory -- the
+    `--mount=type=cache` that used to be rendered here was BuildKit-only syntax
+    Kaniko ignores -- so a command handed the path as a destination fails
+    against a builder that reported no error of its own, e.g. R:
+
+        Error in download.packages(...) : 'destdir' is not a directory
+    """
     if not cache:
         return f"RUN {command}"
-    return f"RUN --mount=type=cache,target={cache} \\\n    {command}"
+    return (f"RUN mkdir -p {cache} \\\n"
+            f" && {command}")
 
 
 def _pkg_run(manager: str, specs: list[str]) -> str:
@@ -232,25 +324,35 @@ def dedupe(items) -> list[str]:
     return out
 
 
-def render(spec: EnvSpec) -> RenderedDockerfile:
+def render(spec: EnvSpec, labels: dict[str, str] | None = None) -> RenderedDockerfile:
     """EnvSpec -> Dockerfile, with a fixed layer order chosen for cache reuse.
 
     Order: FROM, ENV, apt, bootstrap, pre_install, pkgs, post_install,
-    mkdir+WORKDIR, then (installed mode only) COPY + install.
+    mkdir+WORKDIR, then (installed mode only) COPY + install, then LABEL.
 
     Deviation from the plan's list: `pre_install` renders *before* the package
     step rather than beside `post_install`. Rendering a hook named "pre" after
     the install it is meant to precede makes the field useless.
+
+    `labels` are OCI labels (model id, job, spec hash, code revision) the driver
+    knows and the image otherwise forgets. They render LAST so that changing one
+    never invalidates a cached layer above it, and they do not enter the spec
+    hash -- two jobs with the same spec build the same layers.
     """
     steps: list[Step] = []
 
     def emit(kind: str, src_field: str, instruction: str) -> None:
-        steps.append(Step(len(steps), kind, src_field, instruction))
+        idx = len(steps)
+        if instruction.startswith("RUN "):
+            marker = STEP_MARKER.format(index=idx, kind=kind, field=src_field)
+            instruction = f"RUN echo '{marker}' \\\n && " + instruction[len("RUN "):]
+        steps.append(Step(idx, kind, src_field, instruction))
 
     emit("from", "base_image", f"FROM {spec.base_image}@{spec.base_digest}")
 
-    # ENV: static vars plus extra_path folded into the manager's path variable.
-    env = dict(spec.env_vars)
+    # ENV: hygiene defaults, then the spec's own vars (spec wins), then
+    # extra_path folded into the manager's path variable.
+    env = {**_HYGIENE_ENV.get(spec.pkg_manager, {}), **spec.env_vars}
     if spec.mount.extra_path:
         var = _PATH_VAR.get(spec.pkg_manager, "PYTHONPATH")
         parts = list(spec.mount.extra_path)
@@ -269,14 +371,14 @@ def render(spec: EnvSpec) -> RenderedDockerfile:
         emit("bootstrap", "pkg_manager", f"RUN {boot}")
 
     if spec.pre_install:
-        emit("cmd", "pre_install", _heredoc(spec.pre_install))
+        emit("cmd", "pre_install", _run_script(spec.pre_install))
 
     to_install = installable_specs(spec.pkg_manager, dedupe(spec.pkg_specs))
     if to_install:
         emit("pkg", "pkg_specs", _pkg_run(spec.pkg_manager, to_install))
 
     if spec.post_install:
-        emit("cmd", "post_install", _heredoc(spec.post_install))
+        emit("cmd", "post_install", _run_script(spec.post_install))
 
     m = spec.mount
     mounts = dedupe([m.code_path, m.input_path, m.output_path, m.workdir])
@@ -299,6 +401,14 @@ def render(spec: EnvSpec) -> RenderedDockerfile:
     # stack, the entrypoint belongs to the model record and is supplied at run
     # time. That is what lets one image serve many models.
 
-    header = "# syntax=docker/dockerfile:1\n# generated by envbuild -- do not edit\n"
+    all_labels = {"io.envbuild.schema": SCHEMA_VERSION, "io.envbuild.install_mode": spec.install_mode,
+                  "io.envbuild.base": f"{spec.base_image}@{spec.base_digest}",
+                  "io.envbuild.pkg_manager": spec.pkg_manager, **(labels or {})}
+    body = " \\\n      ".join(f"{k}={shlex.quote(str(v))}" for k, v in sorted(all_labels.items()))
+    emit("label", "", f"LABEL {body}")
+
+    # No `# syntax=` frontend directive: that selects a BuildKit frontend and
+    # means nothing to Kaniko, which is the only builder now.
+    header = "# generated by envbuild -- do not edit\n"
     text = header + "\n".join(s.instruction for s in steps) + "\n"
     return RenderedDockerfile(text, steps)

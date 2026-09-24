@@ -1,0 +1,130 @@
+# Ground truth for the envbuild benchmark: what the repo itself says to run.
+#
+# Success for a trial is "the built container runs the example the source repo
+# provides": `example` exits 0 within `timeout_s` and, when `expected_outputs`
+# is set, writes those files. This table is human-curated and independent of
+# the annotator, so scripts/score.py can measure the BUILDER and attribute a
+# failure to the builder, the annotation, or the repo itself.
+#
+# Fields
+#   buildable          the repo ships runnable code the builder is expected to run
+#                      (false -> the trial is a verdict-correctness check, not a build trial)
+#   expected_verdict   for non-buildable models: the verdict a correct builder returns
+#   example            canonical command, smoke tier -- accept as success
+#   example_full       optional stronger example (paper reproduction); reported, not required
+#   workdir            directory the example must run from, relative to the repo root
+#   timeout_s          allowance for `example`; a run still progressing at timeout_s with
+#                      clean stderr is recorded L3-partial (neither success nor builder failure)
+#   expected_outputs   files/globs the example writes, relative to the repo or output dir
+#   human_verified     date a human last ran `example` successfully outside envbuild,
+#                      or null -- until it is set, a failure cannot be attributed to
+#                      "upstream" with confidence
+#   source             where `example` comes from (README, inst/examples, ...)
+#
+# Model ids match the `bench:<model>` ids the pass uses; the models live on the
+# claim as /models/bench-<model>/1.0.
+
+schema: envbuild-ground-truth/1
+models:
+  vivarium-chemotaxis:
+    buildable: true
+    language: python
+    example: "pytest -m 'not slow'"
+    example_full: "python chemotaxis/experiments/paper_experiments.py 7b"
+    workdir: null
+    timeout_s: 600
+    expected_outputs: []
+    human_verified: null
+    source: README.md
+    notes: >
+      Annotation lists three per-process scripts (chemoreceptor_cluster, flagella_motor,
+      membrane_potential); those are legitimate smoke examples too, README headline is the
+      test suite and the paper experiments. Only model that has ever verified at L3.
+
+  tumor-tcell:
+    buildable: true
+    language: python
+    example: "python tumor_tcell/experiments/main.py -w 3"
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: null
+    source: README.md
+    notes: >
+      README gives `main.py -w [workflow id]` with `-w 3` as the concrete example.
+      Needs libGL/libxcb/libglib (opencv wheel); Python 3.8 in the earlier passes -- EOL.
+
+  spatio-flux:
+    buildable: true
+    language: python
+    example: "python scripts/reproduce.py"
+    example_full: "python scripts/reproduce.py"
+    workdir: null
+    timeout_s: 1200
+    expected_outputs: []
+    human_verified: null
+    source: README.md
+    notes: >
+      README headline is `uv run python scripts/reproduce.py`. Measured in pass aks-rev4-6:
+      19 studies simulate in ~11 min and were writing figures + zarr when the 600 s L3 deadline
+      killed the run -- ~14 min end to end, not hours. `pytest` was the earlier draft example;
+      the reproduction is what the repo says to run, and it is what the builder now runs.
+      Needs installed mode (allocate_core discovers processes over installed dists),
+      writable_copy (cwd-relative reads and writes), and the undeclared xarray + zarr.
+      `tests/` is the smoke tier. Annotation entry `run_study.py <SLUG>` has a placeholder.
+      vivarium stack needs numpy<2. 244 MB repo (56 MB .git).
+
+  circadian-clock:
+    buildable: true
+    language: python
+    example: "python biomodels/coreClock/run_clock_model.py"
+    example_full: "python biomodels/fullModel/runModel.py"
+    workdir: biomodels/coreClock
+    timeout_s: 600
+    expected_outputs: []
+    human_verified: null
+    source: structure (no README)
+    notes: >
+      BioModels MODEL2109140001 bundle. The script reads dat/*.txt relative to its own
+      directory -- the annotation omits the workdir, which is why every earlier pass died at L3.
+      Rev 4 derives the workdir at init.
+
+  mbmm:
+    buildable: true
+    language: r
+    example: "Rscript inst/examples/01_simulated_correlate_of_protection.R"
+    example_full: "Rscript -e 'testthat::test_local()'"
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: null
+    source: inst/examples
+    notes: >
+      Annotation lists `R` and `R -e` as entry points (not commands). R package; needs deSolve
+      from CRAN and R CMD INSTALL in installed mode.
+
+  gsmn-tb:
+    buildable: false
+    language: sbml
+    expected_verdict: failed
+    expected_failure_class: ENTRYPOINT_UNKNOWN
+    example: null
+    notes: >
+      Raw SBML (MODEL1507180021) with no bundled runnable code, by design. The correct
+      builder outcome is an honest `failed` naming the missing entry point, not an image.
+
+  hybrid-model-tb:
+    buildable: false
+    language: gama
+    expected_verdict: escalated
+    # status only: an honest `escalated` is the control criterion. The class
+    # varies with what the agent tried first (RUNTIME_ERROR on the R plotting
+    # script in aks-rev4-2, UNSUPPORTED_TOOLCHAIN when it reads the
+    # `unsupported_tool_dependency` finding) and both are correct behaviour.
+    expected_failure_class: null
+    example: null
+    notes: >
+      GAMA model (HybridTB.gaml); GAMA has a headless runner but Java/GAMA is outside the
+      Phase 0 toolchain table. The two R scripts are post-processing on GAMA output, not the
+      model. Becomes buildable when a gama-headless base is added to base_selection.

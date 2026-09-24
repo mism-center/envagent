@@ -31,8 +31,9 @@ uv run src/driver.py --help
 uv run src/driver.py render --spec spec.json
 ```
 
-Anything past `init` needs the compose stack (`docker compose up -d buildkitd
-registry`) and `buildctl` on `PATH`.
+Anything past `init` needs a cluster: the `envbuild` ServiceAccount from
+`deploy/envbuild.yaml`, both PVCs mounted, and a registry the cluster can push
+to. There is no docker daemon and no `kubectl` anywhere in the loop.
 
 ## Invariants to preserve when editing
 
@@ -55,8 +56,24 @@ corpus nobody can learn from — which is the actual product of Phase 0.
   property, not logging. Do not soften it to a warning.
 - **`normalize.py` runs even though nothing reads its output.** It is the seed of
   the memory layer; a signature first recorded in Phase 1 has no history.
-- **`Builder` and `Verifier` stay separate protocols.** They become different pods
+- **`Builder` and `Verifier` stay separate protocols.** They are different pods
   with different isolation requirements.
+
+- **Nothing may require `pods/exec`.** The agent is LLM-driven; `pods/exec` plus
+  `pods/create` is arbitrary code execution in the namespace — create a pod
+  mounting any Secret, exec in, read it. Bytes reach a pod on a mounted PVC and
+  come back the same way. If a change needs to reach into a *running* container,
+  it is the wrong change; `scripts/test_envbuild.py` asserts that neither pod
+  manifest has grown an init container or a sidecar.
+
+- **Verification pods stay tokenless and network-denied.**
+  `automountServiceAccountToken: false` keeps a cluster credential out of model
+  code, and the `envbuild.io/network: deny` label is the in-cluster form of
+  `--network none`. Both are asserted offline; the second is only *true* if the
+  cluster's CNI enforces NetworkPolicy, so prove that separately.
+
+- **The models claim is mounted read-only, always.** A model that can rewrite the
+  corpus source makes every later attempt row unreproducible.
 
 ## Cross-file consistency
 
@@ -68,10 +85,61 @@ When you change one of these, check the others:
 | a typed action | `src/patch.py` `ACTIONS`, `specs/remediation_actions.md`, the coverage test |
 | an attempt/verdict field | `src/record.py` required lists, `specs/record_schema.md` |
 | the renderer's layer order | `scripts/test_envbuild.py` `renderer: fixed layer order` |
-| the buildkit version | `config.ini`, `compose.yaml`, `harness/Dockerfile` — all three |
+| the Kaniko version | `config.ini` `kaniko_image` |
+| a Kubernetes API call | `src/k8s.py`, the `FakeClient` in `scripts/test_envbuild.py` |
+| an RBAC verb the code needs | `deploy/envbuild.yaml` Role, and say why in the comment |
+| a pod manifest field | `src/builder.py` or `src/verifier.py`, and the manifest assertions in the test suite |
+| a classifier rule | `src/classify.py:_rules()`, a case in the test suite, then `uv run scripts/reclassify.py outputs/attempts.jsonl` to see what it does to the corpus |
+| the L1 probe's message shapes | `src/ladder.py` `_L1_PROBE`, the rules that read them (`dist_not_installed`, `py_module`, `missing_soname`) |
+| the step-marker format | `src/envspec.py` `STEP_MARKER`/`find_step_marker`, `src/builder.py` `_MARKER_PREFIX` |
+| the bootstrap pins | `src/envspec.py` `BOOTSTRAP_PINS` — between corpus runs only; signatures move |
+| a refused `ADD_PRE_INSTALL_CMD` shape | `src/patch.py` `_PRE_INSTALL_FORBIDDEN`, `specs/remediation_actions.md` |
+| an annotation finding code or correction outcome | `src/examples.py`, `src/driver.py` (`resolve_corrections`), `specs/success_criteria.md`, `scripts/score.py` |
+| the ground-truth example for a benchmark model | `bench/ground_truth.yaml` (and set `human_verified` when someone has actually run it) |
 
-Bumping buildkit is a deliberate act: it introduces a discontinuity in error
+## Log bytes go through `src/logs.py` first
+
+Nothing reads a pod log raw. `logs.decode()` strips ANSI, unwraps BuildKit
+progress frames (the real message is base64 inside `"data"`), drops Kaniko's
+`INFO[t]` prefix and collapses repeated lines; `logs.tail()` decodes *before*
+truncating. `classify.classify()` calls it itself, so a caller cannot forget,
+but `error_raw`, `stderr_tail` and signatures must also be built from decoded
+text — the first corpus run recorded raw tails and 111 of 176 rows were
+`UNKNOWN` for that reason alone. `scripts/reclassify.py` replays the current
+table over historical rows; run it before and after any rule change.
+
+## Success is the repo's example
+
+`src/examples.py` discovers what the repo says to run; `init` checks the
+annotation against it, chooses the L3 command (recording `entrypoint_source`),
+and derives `mount.workdir` when a script opens files relative to itself. The
+agent may `SET_ENTRYPOINT` to a grounded example (twice per job); every
+correction is judged by the ladder and written to the verdict and to
+`jobs/<job>/annotation-patch.yaml` — the annotation itself is never edited.
+`scripts/score.py` scores a pass against `bench/ground_truth.yaml`. Read
+`specs/success_criteria.md` before changing any of this.
+
+## Three failure planes
+
+`INFRA_UNAVAILABLE` routes to `"infra"`: the driver keeps the row (`charged:
+false`), does not count the attempt, refuses `patch`, and lets the agent re-run
+the same spec up to `max_infra_retries`. Do not add a typed action for anything
+in this plane, and do not let a rule below `infra_network` fire on network text
+(`no_matching_dist` had to learn that).
+
+Bumping the builder is a deliberate act: it introduces a discontinuity in error
 signatures across the corpus. Do it between corpus runs, not during one.
+
+**The builder is Kaniko, and only Kaniko.** There is no BuildKit path and no
+backend switch. `--mount=type=cache`, heredoc `RUN` and `# syntax=` directives
+are BuildKit-only and Kaniko mis-executes or ignores all three, so the renderer
+must never emit them — `scripts/test_envbuild.py` asserts that.
+
+**The Kubernetes surface is five calls**, in `src/k8s.py`: create pod, get pod,
+get log, delete pod, and one access review. Adding a sixth is a real decision —
+it usually means a new RBAC verb, and every verb the agent holds is one an
+LLM-driven loop holds. There is no Kubernetes client library and no `kubectl`;
+`urllib` and the stdlib `ssl` module cover all of it in under 300 lines.
 
 ## Adding a classifier rule
 

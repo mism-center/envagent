@@ -48,10 +48,29 @@ and source. Evidence that flips the guess:
 - `.pyx` sources, or a build backend requiring cython/pybind11/meson/maturin
 - a `Makefile` or `CMakeLists.txt`
 - docs that call for `pip install -e .`
+- a README whose install line installs the *project* (`pip install .`,
+  `uv sync` / `uv run`, `poetry install`) alongside a `pyproject.toml` or
+  `setup.py`. Frameworks that discover plugins over installed distributions
+  (process-bigraph's `allocate_core()`, pluggy, stevedore) find nothing when
+  the package is merely on `PYTHONPATH` — spatio-flux failed four passes at L3
+  with `no link found at address` for exactly this reason.
 
 Forcing such a repo into mounted mode produces weird failures in the tail, so
 when the guess is wrong, `SWITCH_INSTALL_MODE` is a legitimate typed action —
 not a workaround.
+
+## Lockfiles
+
+A committed `uv.lock`, `poetry.lock`, `Pipfile.lock` or fully `==`-pinned
+`requirements.txt` is the author's own resolution and outranks every other
+dependency signal. `draft_spec` pins each declared dependency to its locked
+version (extras kept, other constraints replaced; an explicit `==` in the
+annotation is left alone) and `init` reports `lockfile_honoured`. Direct
+dependencies only: pip resolves the transitive closure against the pins, so the
+spec stays readable and every pin is attributable. spatio-flux locked
+`process-bigraph 1.4.12`; three passes resolved `1.8.4` and died on the API
+drift at L3. `renv.lock` is reported but not yet applied — the R renderer would
+need `remotes::install_version`.
 
 ## Existing Dockerfiles
 
