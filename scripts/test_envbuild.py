@@ -20,6 +20,7 @@ import io
 import json
 import re
 import shutil
+import os
 import sys
 import time
 import tempfile
@@ -230,7 +231,7 @@ def _render_kaniko_portable():
                        apt_packages=["libxml2-dev"],
                        pre_install=["mkdir -p /root/.cache/R"],
                        post_install=["echo done"])).text
-    assert "<<'ENVBUILD'" not in text and "ENVBUILD" not in text, text
+    assert "<<'ENVBUILD'" not in text and "<<ENVBUILD" not in text and not re.search(r"^ENVBUILD$", text, re.M), text
     assert "--mount=" not in text, text          # BuildKit-only; Kaniko ignores it
     assert "# syntax=" not in text, text         # selects a BuildKit frontend
     # Every RUN opens with its step marker, then the script proper.
@@ -303,8 +304,16 @@ def _a_base():
 
 @check("action SWITCH_INSTALLER: changes the install command and cache mount")
 def _a_installer():
-    b, a = rendered_diff(spec(), "SWITCH_INSTALLER", "mamba")
+    import dataclasses as _dc
+    conda_base = _dc.replace(spec(), base_image="mambaorg/micromamba:1.5@sha256:" + "b" * 64)
+    b, a = rendered_diff(conda_base, "SWITCH_INSTALLER", "mamba")
     assert "pip install" in b and "micromamba install -y -n base" in a
+    # On a base that has no mamba the switch is refused and names the base to use (hold-out, biosimulators_tellurium).
+    try:
+        patch.apply(spec(), "SWITCH_INSTALLER", "mamba")
+        raise AssertionError("mamba on a slim base must be refused")
+    except patch.PatchError as e:
+        assert "CHANGE_BASE_IMAGE mambaorg/micromamba" in str(e), e
 
 
 @check("action SWITCH_INSTALL_MODE: adds COPY + install")
@@ -356,13 +365,15 @@ def _a_immutable():
 def _a_coverage():
     args = {"ADD_APT_PKG": "cmake", "ADD_PKG": "scipy", "PIN_PKG": "numpy==1.0",
             "UNPIN_PKG": "numpy", "CHANGE_INTERPRETER_VERSION": "3.12",
-            "CHANGE_BASE_IMAGE": "ubuntu:24.04", "SWITCH_INSTALLER": "conda",
+            "CHANGE_BASE_IMAGE": "ubuntu:24.04", "SWITCH_INSTALLER": "renv", "REMOVE_PKG": "numpy",
             "SWITCH_INSTALL_MODE": "installed", "SET_ENV_VAR": "A=b",
             "ADD_PRE_INSTALL_CMD": "echo x", "FIX_MOUNT_CONTRACT": "workdir=/w",
             "SET_ENTRYPOINT": "python run.py --steps 10", "SET_L3_TIMEOUT": "1200", "ESCALATE": ""}
     assert set(args) == set(patch.ACTIONS)
+    import dataclasses as _dc
+    r_base = _dc.replace(spec(), base_image="rocker/r-ver:4.4.1@sha256:" + "c" * 64)
     for action, arg in args.items():
-        patch.apply(spec(), action, arg)
+        patch.apply(r_base if action == "SWITCH_INSTALLER" else spec(), action, arg)
 
 
 # ---------------------------------------------------------------- classify
@@ -520,9 +531,12 @@ def _d_draft_spec_mount():
     src_spec = driver.draft_spec(src_ev, {}, baseselect.select(src_ev), digest, "v0.24.0")
     assert src_spec.mount.extra_path == ("/model/src",), src_spec.mount.extra_path
 
+    # The installed_mode fixture drafts `installed`: the package comes from
+    # site-packages, so code_path must NOT be seeded onto the import path (H12b).
     flat_ev = evidence.scan(FIXTURES / "installed_mode")
-    flat_spec = driver.draft_spec(flat_ev, {}, baseselect.select(flat_ev), digest, "v0.24.0")
-    assert flat_spec.mount.extra_path == ("/model",), flat_spec.mount.extra_path
+    flat_choice = baseselect.select(flat_ev); assert flat_choice.install_mode == "installed", flat_choice
+    flat_spec = driver.draft_spec(flat_ev, {}, flat_choice, digest, "v0.24.0")
+    assert flat_spec.mount.extra_path == (), flat_spec.mount.extra_path
 
 
 @check("evidence: install_mode guessed from compiled-extension evidence")
@@ -1102,14 +1116,18 @@ def _c_infra():
     assert c.failure_class == "INFRA_UNAVAILABLE", c
 
 
-@check("classify: 'from versions: none' is an unreachable index, not a resolution conflict")
+@check("classify: 'from versions: none' is never an UNPIN_PKG (rev 3) and never an outage by itself (hold-out 1)")
 def _c_none_versions():
     # UNPIN_PKG on this text was the single most damaging false repair in the
     # corpus: it stripped the author's exact `vivarium-core==1.6.0` to fix DNS.
+    # Rev 3 then over-corrected to INFRA_UNAVAILABLE, and the hold-out pass
+    # closed 7 jobs as `error` on names that simply do not exist on PyPI.
+    # Without a network marker the text means "no such project": no unpin,
+    # no infra retry -- a typed UNKNOWN_DISTRIBUTION for the agent to act on.
     c = classify.classify("ERROR: Could not find a version that satisfies the requirement "
                           "vivarium-core==1.6.0 (from versions: none)\n"
                           "ERROR: No matching distribution found for vivarium-core==1.6.0")
-    assert c.failure_class == "INFRA_UNAVAILABLE", c
+    assert c.failure_class == "UNKNOWN_DISTRIBUTION" and c.action != "UNPIN_PKG", c
     # A real conflict lists what the index *did* have.
     c = classify.classify("ERROR: Could not find a version that satisfies the requirement "
                           "numpy==999 (from versions: 1.26.4, 2.0.0)\n"
@@ -2025,6 +2043,496 @@ def _a_typical_runtime():
     st["command"] = "python b.py"
     assert driver.l3_timeout_s(cfg, st) == 105
 
+
+# ---------------------------------------------------------------- hold-out 1: what twenty unseen repos taught
+# Every text below is from a job in aks-holdout-1.
+
+_NO_DIST = ("ERROR: Could not find a version that satisfies the requirement {x} (from versions: none)\n"
+            "ERROR: No matching distribution found for {x}\n")
+
+@check("classify H1: pip's `(from versions: none)` is not a network fault (7 of 19 hold-out jobs closed `error` on it)")
+def _c_no_dist_not_infra():
+    for x in ["viva-parsimony", "pbg-readdy==0.1.0", "ConnPlotter==0.7a0", "libsbml", "SuiteSparse"]:
+        c = classify.classify(_NO_DIST.format(x=x), rung="L0")
+        assert c.failure_class == "UNKNOWN_DISTRIBUTION" and c.routes_to == "retry", (x, c)
+    # A real outage still routes to infra, even with the same pip tail.
+    c = classify.classify("WARNING: Retrying ... NewConnectionError: [Errno -3] Temporary failure in name resolution\n"
+                          + _NO_DIST.format(x="numpy"), rung="L0")
+    assert c.failure_class == "INFRA_UNAVAILABLE" and c.routes_to == "infra", c
+
+@check("classify H1: the origin of the missing name decides the move (undeclared -> REMOVE_PKG; vcs -> escalate; declared -> agent)")
+def _c_no_dist_origin():
+    origin = {"libsbml": "undeclared", "viva-parsimony": "vcs:https://github.com/vivarium-collective/viva-parsimony", "numpy": "declared"}
+    c = classify.classify(_NO_DIST.format(x="libsbml"), rung="L0", pkg_origin=origin)
+    assert (c.action, c.arg) == ("REMOVE_PKG", "libsbml"), c
+    c = classify.classify(_NO_DIST.format(x="viva-parsimony"), rung="L0", pkg_origin=origin)
+    assert c.action is None and "git/path source" in c.evidence, c
+    c = classify.classify(_NO_DIST.format(x="numpy==9.9"), rung="L0", pkg_origin=origin)
+    assert c.action is None and "REMOVE_PKG" in c.evidence, c
+
+@check("action REMOVE_PKG: drops the matching spec; refuses an absent one")
+def _a_remove_pkg():
+    s = spec(pkg_specs=["numpy<2", "python-libsbml", "scipy"])
+    r = patch.apply(s, "REMOVE_PKG", "python-libsbml")
+    assert r.spec.pkg_specs == ["numpy<2", "scipy"], r.spec.pkg_specs
+    try:
+        patch.apply(r.spec, "REMOVE_PKG", "python-libsbml"); raise AssertionError
+    except patch.PatchError:
+        pass
+
+@check("evidence H2: a module anywhere in the tree is local, not a PyPI guess (c302 SpreadsheetDataReader, covasim ConnPlotter)")
+def _e_local_anywhere():
+    root = _repo({"c302/__init__.py": "import SpreadsheetDataReader\nimport ConnPlotter\nimport xarray\n",
+                  "c302/SpreadsheetDataReader.py": "", "data/ConnPlotter.py": "", "setup.py": "from setuptools import setup\nsetup(name='c302')\n"})
+    ev = evidence.scan(root)
+    und = ev["python"].get("undeclared_imports") or {}
+    assert "SpreadsheetDataReader" not in und and "ConnPlotter" not in und and und.get("xarray") == "xarray", und
+
+@check("evidence H2: libsbml imports resolve to python-libsbml")
+def _e_libsbml():
+    assert classify.MODULE_PYPI["libsbml"] == "python-libsbml"
+
+@check("evidence H6: Poetry caret/tilde specs render as PEP 440 ranges (biosimulators_tellurium docker^7.1.0)")
+def _e_poetry_caret():
+    root = _repo({"pyproject.toml": "[tool.poetry]\nname='x'\nversion='1'\n[tool.poetry.dependencies]\npython='^3.9'\ndocker='^7.1.0'\nnumpy='~1.26'\nscipy='*'\n"})
+    deps = evidence.scan(root)["python"]["declared_deps"]
+    assert "docker>=7.1.0,<8" in deps and "numpy>=1.26,<1.27" in deps and "scipy" in deps, deps
+
+@check("evidence M1: git sources in [tool.uv.sources] and uv.lock are reported, rendered as a sha-pinned direct ref, never version-pinned")
+def _e_vcs_sources():
+    root = _repo({"pyproject.toml": "[project]\nname='viva-mgen'\nversion='0.1'\ndependencies=['viva-parsimony','numpy']\n"
+                                    "[tool.uv.sources]\nviva-parsimony = { git = 'https://github.com/vivarium-collective/viva-parsimony' }\n",
+                  "uv.lock": "version = 1\n[[package]]\nname = 'viva-parsimony'\nversion = '0.1.0'\nsource = { git = 'https://github.com/vivarium-collective/viva-parsimony#abc' }\n\n"
+                             "[[package]]\nname = 'numpy'\nversion = '1.26.4'\nsource = { registry = 'https://pypi.org/simple' }\n\n"
+                             "[[package]]\nname = 'viva-mgen'\nversion = '0.1'\nsource = { editable = '.' }\n"})
+    ev = evidence.scan(root)
+    assert ev["python"]["vcs_sources"] == {"viva-parsimony": "https://github.com/vivarium-collective/viva-parsimony"}, ev["python"]["vcs_sources"]
+    assert ev["lockfile"]["sources"]["viva-parsimony"].startswith("git:") and ev["lockfile"]["sources"]["viva-mgen"].startswith("editable:")
+    ann = evidence.read_annotation(root / "nope")
+    s = driver.draft_spec(ev, ann, baseselect.select(ev, ann), "sha256:" + "a" * 64, "kaniko")
+    assert "numpy==1.26.4" in s.pkg_specs and not any(p.startswith("viva-parsimony==") for p in s.pkg_specs), s.pkg_specs
+    assert "viva-parsimony @ git+https://github.com/vivarium-collective/viva-parsimony@abc" in s.pkg_specs, s.pkg_specs
+    assert driver.draft_spec.pkg_origin["viva-parsimony"].startswith("git:") and driver.draft_spec.pkg_origin["numpy"] == "lock"
+
+@check("examples H4: grounding accepts a CI glob that matches files and `Rscript -e` in an R package")
+def _g_glob_and_rscript():
+    root = _repo({"test_a.py": "", "tests/test_b.py": "", "DESCRIPTION": "Package: epimodel\n"})
+    assert examples.grounded(root, "pytest test_*.py -n auto", []) is None
+    assert examples.grounded(root, "pytest nothing_*.py", []) is not None
+    assert examples.grounded(root, "Rscript -e 'testthat::test_local()'", []) is None
+    root2 = _repo({"a.py": ""})
+    assert examples.grounded(root2, "Rscript -e 'testthat::test_local()'", []) is not None    # not an R package
+
+
+@check("evidence H2: guarded imports (try/except, __main__) and names provided by a declared or VCS dist are not PyPI guesses (c302, viva-mgen)")
+def _e_guarded_and_provided():
+    root = _repo({"pyproject.toml": "[project]\nname='c302'\nversion='1'\ndependencies=['pyNeuroML>=1.3', 'WormNeuroAtlas', 'viva-parsimony']\n"
+                                    "[tool.uv.sources]\nviva-parsimony = { git = 'https://github.com/x/viva-parsimony' }\n",
+                  "c302/__init__.py": "try:\n    import PyOpenWorm\nexcept Exception:\n    pass\nfrom neuroml import Network\n"
+                                      "import WormNeuroAtlasReader\nimport pbg_parsimony\nimport pandas\nimport pylab\n"
+                                      "if __name__ == '__main__':\n    import boto3\n"})
+    und = evidence.scan(root)["python"]["undeclared_imports"]
+    assert und == {"pandas": "pandas", "pylab": "matplotlib"}, und
+
+@check("baseselect: one stray .R file does not make a Python repo an R model (covasim)")
+def _b_not_r():
+    root = _repo({"pyproject.toml": "[project]\nname='cv'\nversion='1'\ndependencies=['numpy']\n",
+                  "cv/__init__.py": "import numpy\n", "cv/a.py": "", "cv/b.py": "", "misc/plot.R": "x <- 1\n"})
+    ev = evidence.scan(root)
+    assert baseselect.select(ev, {}).pkg_manager == "pip", baseselect.select(ev, {})
+
+# ---------------------------------------------------------------- hold-out 2: the second layer (aks-holdout-2)
+
+@check("envspec H12: installed mode sets PYTHONSAFEPATH so the source tree cannot shadow the installed package (viva-cpm, viva-biofilm)")
+def _r_safepath():
+    import dataclasses as _dc
+    txt = render(_dc.replace(spec(), install_mode="installed")).text
+    assert "PYTHONSAFEPATH=1" in txt, txt
+    assert "PYTHONSAFEPATH" not in render(spec()).text          # mounted mode imports from the mount
+
+@check("classify H7: a write into a directory that holds source gets writable_copy, not a volume over the code (viva-simbio)")
+def _c_mount_over_source():
+    txt = "PermissionError: [Errno 30] Read-only file system: '/model/demo/report.html'"
+    c = classify.classify(txt, rung="L3", exit_code=1, mount={"code_path": "/model", "workdir": "/model"}, source_tops=["demo", "viva_simbio"])
+    assert (c.action, c.arg) == ("FIX_MOUNT_CONTRACT", "writable_copy=true"), c
+    c = classify.classify(txt.replace("/demo/", "/out/"), rung="L3", exit_code=1, mount={"code_path": "/model", "workdir": "/model"}, source_tops=["demo"])
+    assert c.arg == "output_path=/model/out", c
+
+@check("evidence H7: source_tops lists the top-level dirs holding source")
+def _e_source_tops():
+    root = _repo({"demo/demo_report.py": "", "pkg/__init__.py": "", "data/x.csv": "", "setup.py": ""})
+    assert evidence.scan(root)["source_tops"] == ["demo", "pkg", "setup.py"], evidence.scan(root)["source_tops"]
+
+@check("evidence H13: a frozen requirements file under tests/ is never a declaration; root requirements only when nothing else declares (covasim)")
+def _e_frozen_requirements():
+    root = _repo({"pyproject.toml": "[project]\nname='cv'\nversion='1'\ndependencies=['numpy','sciris']\n",
+                  "tests/requirements_frozen.txt": "ConnPlotter==0.7a0\nPyNEST==2.16.0\nidna==3.7\n", "requirements.txt": "numpy\nmatplotlib\n"})
+    py = evidence.scan(root)["python"]
+    assert py["declared_deps"] == ["numpy", "sciris"], py["declared_deps"]
+    assert py["ignored_requirements"] == ["tests/requirements_frozen.txt"], py["ignored_requirements"]
+    root2 = _repo({"requirements.txt": "numpy\nmatplotlib\n", "run.py": ""})
+    assert evidence.scan(root2)["python"]["declared_deps"] == ["matplotlib", "numpy"]
+
+@check("ladder H14: the L2 probe follows the entry's language -- a .py entry on an R base is probed with python (covid-sim)")
+def _l_probe_language():
+    import dataclasses as _dc
+    seen = {}
+    class V:
+        def run(self, image_ref, code_ref, cmd, mount, timeout_s, **kw): seen["cmd"] = cmd; return ladder.RunResult(True, 0, "", "")
+    s = _dc.replace(spec(), pkg_manager="renv", base_image="rocker/r-ver:4.4.1@sha256:" + "a" * 64)
+    ladder.run_l2(V(), "img", "/models/m/1.0", s, {"kind": "file", "value": "data/run_sample.py"}, 60)
+    assert seen["cmd"][0] == "python", seen["cmd"]
+    ladder.run_l2(V(), "img", "/models/m/1.0", s, {"kind": "file", "value": "R/run.R"}, 60)
+    assert seen["cmd"][0] == "Rscript", seen["cmd"]
+    ladder.run_l2(V(), "img", "/models/m/1.0", spec(), {"kind": "file", "value": "scripts/a.R"}, 60)
+    assert seen["cmd"][0] == "Rscript", seen["cmd"]                  # an R entry on a python base: R decides
+
+@check("classify H15: R's plural 'dependencies ... are not available' names them all in one ADD_PKG (epidemics)")
+def _c_r_plural():
+    c = classify.classify("ERROR: dependencies ‘BH’, ‘Rcpp’, ‘RcppEigen’ are not available for package ‘epidemics’", rung="L0")
+    assert (c.failure_class, c.action, c.arg) == ("MISSING_DEPENDENCY", "ADD_PKG", "BH Rcpp RcppEigen"), c
+    s = patch.apply(spec(pkg_specs=["deSolve"]), "ADD_PKG", "BH Rcpp RcppEigen").spec
+    assert s.pkg_specs == ["deSolve", "BH", "Rcpp", "RcppEigen"], s.pkg_specs
+    assert patch.apply(spec(), "ADD_PKG", "scipy>=1.10").spec.pkg_specs[-1] == "scipy>=1.10"   # a constrained spec is one item
+
+@check("evidence H15: DESCRIPTION LinkingTo packages are declared dependencies (epidemics: BH, Rcpp, RcppEigen)")
+def _e_linkingto():
+    root = _repo({"DESCRIPTION": "Package: epidemics\nImports:\n    deSolve\nLinkingTo:\n    BH, Rcpp,\n    RcppEigen\n", "R/a.R": ""})
+    deps = evidence.scan(root)["r"]["deps"]
+    assert {"BH", "Rcpp", "RcppEigen", "deSolve"} <= set(deps), deps
+
+@check("patch H15: PIN_PKG is refused for R specs (install.packages takes names only)")
+def _a_r_pin():
+    import dataclasses as _dc
+    s = _dc.replace(spec(pkg_specs=["BH"]), pkg_manager="renv", base_image="rocker/r-ver:4.4.1@sha256:" + "a" * 64)
+    try:
+        patch.apply(s, "PIN_PKG", "BH==1.75.0"); raise AssertionError
+    except patch.PatchError as e:
+        assert "install.packages" in str(e)
+
+@check("ladder H11: the L1 probe passes a distribution when any of its modules imports; an absent distribution still fails")
+def _l_l1_canonical():
+    import subprocess as _sp
+    env = {**os.environ, "ENVBUILD_PROBE": ladder._L1_PROBE, "ENVBUILD_DISTS": "setuptools,pip,pyyaml", "ENVBUILD_MODS": "pyyaml=yaml"}
+    r = _sp.run([sys.executable, "-c", ladder._RUNNER], env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and "L1 ok: 3 distributions probed" in r.stdout, (r.returncode, r.stderr[-300:])
+    env["ENVBUILD_DISTS"] = "pyyaml,no-such-dist-xyz"
+    r = _sp.run([sys.executable, "-c", ladder._RUNNER], env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 1 and "no-such-dist-xyz" in r.stderr and "yaml" not in r.stderr.split("no-such-dist-xyz")[0], r.stderr
+
+
+# ---------------------------------------------------------------- hold-out 3: H16 and H12b
+
+@check("ladder H16: a command with no script token is not a missing entry point -- L2 is recorded as not probeable and L3 runs (c302 `pytest`, epidemics `Rscript -e`)")
+def _l_bare_command():
+    calls = []
+    class V:
+        def run(self, image_ref, code_ref, cmd, mount, timeout_s, **kw):
+            calls.append(cmd); return ladder.RunResult(True, 0, "L1 ok: 0 distributions probed\nENVBUILD_LOCK_BEGIN pip\nENVBUILD_LOCK_END\n", "")
+        def outputs_listing(self): return []
+    res = ladder.climb(V(), "img", "/models/m/1.0", spec(), {"kind": "none", "value": ""}, "pytest -q", 60)
+    assert res.failed_at is None and res.reached == "L3", (res.failed_at, res.reached, res.stderr)
+    assert "not probeable" in res.notes.get("l2_claim", ""), res.notes
+    assert any("pytest" in " ".join(c) for c in calls), calls             # L3 ran the command
+    # Genuinely nothing to run is still ENTRYPOINT_MISSING.
+    res = ladder.climb(V(), "img", "/models/m/1.0", spec(), {"kind": "none", "value": ""}, "", 60)
+    assert res.failed_at == "L2" and "declares no entry point" in res.stderr
+
+@check("envspec H12b: installed mode never renders code_path (or a dir under it) into PYTHONPATH (viva-cpm, viva-biofilm)")
+def _r_installed_no_codepath():
+    import dataclasses as _dc
+    s = _dc.replace(spec(), install_mode="installed", mount=MountContract(extra_path=("/model", "/model/src", "/opt/extra")))
+    txt = render(s).text
+    assert "PYTHONPATH=/opt/extra" in txt and "/model" not in txt.split("PYTHONPATH=")[1].split()[0], txt
+    txt_m = render(_dc.replace(s, install_mode="mounted")).text
+    assert "PYTHONPATH=/model:/model/src:/opt/extra" in txt_m, txt_m
+
+@check("patch H12b: SWITCH_INSTALL_MODE installed drops extra_path entries under code_path and says so")
+def _a_switch_mode_strips():
+    s = spec(mount=MountContract(extra_path=("/model", "/opt/extra")))
+    r = patch.apply(s, "SWITCH_INSTALL_MODE", "installed")
+    assert r.spec.mount.extra_path == ("/opt/extra",) and "dropped" in r.note, (r.spec.mount.extra_path, r.note)
+
+@check("driver H12b: an installed-mode draft does not seed extra_path with code_path even when local modules exist")
+def _d_installed_draft_no_extra():
+    root = _repo({"pyproject.toml": "[project]\nname='x'\nversion='1'\ndependencies=['numpy']\n", "README.md": "```\npip install .\npython run.py\n```\n",
+                  "x/__init__.py": "", "run.py": "import x\n", "helpers.py": ""})
+    ev = evidence.scan(root); ann = evidence.read_annotation(root / "nope"); ch = baseselect.select(ev, ann)
+    assert ch.install_mode == "installed", ch
+    s = driver.draft_spec(ev, ann, ch, "sha256:" + "a" * 64, "kaniko")
+    assert s.mount.extra_path == (), s.mount.extra_path
+
+# ---------------------------------------------------------------- hold-out 4
+
+@check("verifier H19: a command with an unbalanced quote is split, not a crash (catalyst-jl `julia -e '` closed error with 0 attempts)")
+def _v_quote_safe():
+    from verifier import quote_cmd
+    assert quote_cmd("julia --project=docs/ -e '") == ["julia", "--project=docs/", "-e", "'"]
+    assert examples.is_command("julia --project=docs/ -e '") is False
+    assert examples.is_command("python run.py --x 'a b'") is True
+
+@check("envspec H18: the R install step fails the build, by name, when a package did not land (epidemics: ADD_PKG testthat 'succeeded' with no testthat)")
+def _r_install_fails_loud():
+    import dataclasses as _dc
+    s = _dc.replace(spec(), pkg_manager="renv", pkg_specs=["deSolve", "testthat"], base_image="rocker/r-ver:4.3@sha256:" + "c" * 64)
+    txt = render(s).text
+    assert "ENVBUILD_R_NOT_INSTALLED" in txt and "quit(status = 1)" in txt and 'installed.packages()' in txt, txt
+
+@check("k8s/verifier H17: a container that exits non-zero with no log leaves the exit code and reason as evidence (c302 L3: exit None, empty stderr)")
+def _k_exit_evidence():
+    import k8s
+    class C:
+        def get_pod(self, name):
+            return {"status": {"phase": "Failed", "containerStatuses": [{"name": "main", "state": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}}}]}}
+    code, note = k8s.Client.wait_terminated(C(), "p", "main", deadline=time.monotonic() + 5)
+    assert code == 137 and "OOMKilled" in note and "ENVBUILD_EXIT" in note, (code, note)
+
+@check("ladder H12c: pytest in installed mode runs with --import-mode=importlib so the source tree does not shadow the package again (viva-biofilm L3)")
+def _l_pytest_importlib():
+    import dataclasses as _dc
+    seen = {}
+    class V:
+        def run(self, image_ref, code_ref, cmd, mount, timeout_s, network=False, env=None):
+            seen["env"] = env or {}; seen["cmd"] = cmd; return ladder.RunResult(True, 0, "", "")
+        def outputs_listing(self): return []
+    s = _dc.replace(spec(), install_mode="installed")
+    ladder.run_l3(V(), "img", "/models/m/1.0", s, "pytest -q", 60)
+    assert "--import-mode=importlib" in seen["env"].get("PYTEST_ADDOPTS", ""), seen
+    ladder.run_l3(V(), "img", "/models/m/1.0", spec(), "pytest -q", 60)        # mounted: untouched
+    assert "PYTEST_ADDOPTS" not in seen["env"], seen
+
+@check("classify R2: `No module named 'tesbml'` escalates with evidence -- never ADD_PKG tesbml, and not the disproved tellurium pin (hold-out 5: 2.2.10 imports it too)")
+def _c_tesbml():
+    c = classify.classify("tellurium (from tellurium): ModuleNotFoundError: No module named 'tesbml'", rung="L1")
+    assert (c.failure_class, c.action, c.arg) == ("UNSUPPORTED_TOOLCHAIN", "ESCALATE", None), c
+    assert "tellurium" in c.evidence and "3 passes" in c.evidence
+
+# ---------------------------------------------------------------- hold-out 5
+
+@check("ladder H12d: under writable_copy, extra_path entries under code_path are moved into the copy (starsim: /model/tests/temp read-only while rootdir was /scratch/model)")
+def _l_writable_copy_extra_path():
+    import dataclasses as _dc
+    seen = {}
+    class V:
+        def run(self, image_ref, code_ref, cmd, mount, timeout_s, network=False, env=None):
+            seen["env"] = env or {}; seen["cmd"] = cmd; return ladder.RunResult(True, 0, "", "")
+        def outputs_listing(self): return []
+    s = _dc.replace(spec(), mount=MountContract(extra_path=("/model", "/model/src", "/opt/other"), writable_copy=True))
+    ladder.run_l3(V(), "img", "/models/m/1.0", s, "pytest -q", 60)
+    pp = seen["env"].get("PYTHONPATH", "")
+    assert pp.split(":") == [ladder.SCRATCH + "/model", ladder.SCRATCH + "/model/src", "/opt/other"], pp
+    s2 = _dc.replace(spec(), mount=MountContract(extra_path=("/opt/other",), writable_copy=True))
+    ladder.run_l3(V(), "img", "/models/m/1.0", s2, "python run.py", 60)
+    assert "PYTHONPATH" not in seen["env"], seen["env"]        # nothing under code_path: untouched
+
+@check("driver/score H20: a verification on a test suite is tier 'tests' and is reported separately, not as build success (viva-yalla `pytest`)")
+def _d_entry_tier():
+    assert driver.entry_tier("pytest", "agent") == "tests"
+    assert driver.entry_tier("Rscript -e 'testthat::test_local()'", "agent") == "tests"
+    assert driver.entry_tier("make test", "agent") == "tests"
+    assert driver.entry_tier("python tests/test_x.py", "agent") == "tests"
+    assert driver.entry_tier("python demo/demo_report.py", "annotation") == "headline"
+    assert driver.entry_tier("python studies/tumor-microenvironment/sims/run.py", "annotation") == "headline"
+    assert driver.entry_tier("", None) == "none"
+
+# ---------------------------------------------------------------- sprint before hold-out 6
+
+@check("classify: a toolchain's read-only object-file error at L3 is a mount-contract repair -> writable_copy (epidemics: compile_dll `can't create odin.o`)")
+def _c_toolchain_readonly():
+    c = classify.classify("gcc -std=gnu17 ...\nFatal error: can't create odin.o: Read-only file system\nERROR: compilation failed for package 'epidemics'",
+                          rung="L3", mount={"code_path": "/model"}, source_tops=("src", "R"))
+    assert (c.failure_class, c.action, c.arg) == ("MOUNT_CONTRACT_ERROR", "FIX_MOUNT_CONTRACT", "writable_copy=true"), c
+    assert c.rule == "toolchain_readonly", c.rule
+
+@check("examples H22: environment-setup lines are not commands (viva-cpm init chose `python -m venv … && source …`)")
+def _e_setup_lines():
+    for bad in ["python -m venv .venv && source .venv/bin/activate", "source .venv/bin/activate", ". venv/bin/activate && python run.py",
+                "pip install -e .", "uv sync", "conda create -n x python=3.11", "conda activate x", "cd repo", "export FOO=1", "git clone https://x/y"]:
+        assert not examples.is_command(bad), bad
+    for good in ["python run.py", "pytest -q", "Rscript scripts/a.R", "python -m mypkg.cli --n 3", "uv run python demo.py"]:
+        assert examples.is_command(good), good
+
+@check("classify R3: pip `metadata-generation-failed` from a legacy sdist importing a module at setup time steps the interpreter down one rung, never ADD_PKG (c302 x2)")
+def _c_legacy_sdist():
+    err = ("Collecting termcolor~=1.1.0\n  Downloading termcolor-1.1.0.tar.gz\n  Preparing metadata (setup.py): finished with status 'error'\n"
+           "  ModuleNotFoundError: No module named 'termcolor'\n  note: This error originates from a subprocess, and is likely not a problem with pip.\n"
+           "error: metadata-generation-failed\n× Encountered error while generating package metadata.")
+    c = classify.classify(err, rung="L0", python_version="3.11")
+    assert (c.failure_class, c.action, c.arg) == ("DEP_RESOLUTION_CONFLICT", "CHANGE_INTERPRETER_VERSION", "3.10"), c
+    c = classify.classify(err, rung="L0", python_version="3.9")
+    assert (c.failure_class, c.action) == ("DEP_RESOLUTION_CONFLICT", "ESCALATE"), c
+    # a plain ModuleNotFoundError without the metadata marker is still py_module
+    c = classify.classify("ModuleNotFoundError: No module named 'termcolor'", rung="L1", python_version="3.11")
+    assert c.rule == "py_module" and c.action == "ADD_PKG", c
+
+@check("M1: a uv.lock git source renders as a pinned PEP 508 direct reference and the image gets git (viva-membrane-actin-composite, viva-mgen)")
+def _m1_git_direct_ref():
+    assert driver.git_direct_ref("pbg-mem3dg", "git:https://github.com/vivarium-collective/pbg-mem3dg.git#e71d97c1") == "git+https://github.com/vivarium-collective/pbg-mem3dg@e71d97c1"
+    assert driver.git_direct_ref("viva-parsimony", "https://github.com/vivarium-collective/viva-parsimony#main") == "git+https://github.com/vivarium-collective/viva-parsimony@main"
+    assert driver.git_direct_ref("x", "path:../sibling") is None and driver.git_direct_ref("x", "workspace") is None
+    # uv.lock query forms seen on viva-membrane-actin-composite's sibling packages
+    assert driver.git_direct_ref("x", "git:https://github.com/vc/pbg-emitters.git?branch=main#8a99539d") == "git+https://github.com/vc/pbg-emitters@8a99539d"
+    assert driver.git_direct_ref("x", "git:https://github.com/vc/ic.git?rev=65c793fd#65c793fd") == "git+https://github.com/vc/ic@65c793fd"
+    root = _repo({"pyproject.toml": '[project]\nname="m"\nversion="0.1"\ndependencies=["numpy","viva-parsimony","pbg-mem3dg"]\n'
+                                    '[tool.uv.sources]\nviva-parsimony = { git = "https://github.com/vc/viva-parsimony", branch = "main" }\n'
+                                    'pbg-mem3dg = { git = "https://github.com/vc/pbg-mem3dg.git" }\n',
+                  "uv.lock": 'version = 1\n[[package]]\nname = "pbg-mem3dg"\nversion = "0.1.0"\nsource = { git = "https://github.com/vc/pbg-mem3dg.git#e71d97c1" }\n'
+                             '[[package]]\nname = "numpy"\nversion = "2.1.0"\nsource = { registry = "https://pypi.org/simple" }\n',
+                  "m/__init__.py": ""})
+    ev = evidence.scan(root); ch = baseselect.select(ev, {})
+    s = driver.draft_spec(ev, {}, ch, "sha256:" + "a" * 64, "kaniko")
+    specs = {patch.req_name(x): x for x in s.pkg_specs}
+    assert specs["pbg-mem3dg"] == "pbg-mem3dg @ git+https://github.com/vc/pbg-mem3dg@e71d97c1", specs
+    assert specs["viva-parsimony"] == "viva-parsimony @ git+https://github.com/vc/viva-parsimony@main", specs
+    assert specs["numpy"] == "numpy==2.1.0", specs                      # lock pin still applies to registry deps
+    assert driver.draft_spec.vcs_unpinned == ["viva-parsimony"] and set(driver.draft_spec.vcs_installed) == {"pbg-mem3dg", "viva-parsimony"}
+    assert driver.draft_spec.pkg_origin["pbg-mem3dg"].startswith("git:")
+    txt = render(s).text
+    assert "git" in [a for a in re.findall(r"apt-get install -y --no-install-recommends \\\n\s+([^\\]+)", txt)[0].split()], txt
+    assert "'pbg-mem3dg @ git+https://github.com/vc/pbg-mem3dg@e71d97c1'" in txt, txt
+    assert "git" not in render(spec()).text.split("apt-get")[-1] if "apt-get" in render(spec()).text else True
+
+@check("classify M1: a failed git fetch is UNKNOWN_DISTRIBUTION naming the ref, not a network outage and not py_module")
+def _c_git_fetch():
+    c = classify.classify("Running command git clone --filter=blob:none --quiet https://github.com/vc/x /tmp/pip-install-abc\n"
+                          "fatal: repository 'https://github.com/vc/x/' not found\nerror: subprocess-exited-with-error", rung="L0")
+    assert c.failure_class == "UNKNOWN_DISTRIBUTION" and c.rule == "git_fetch_failed" and "vc/x" in (c.arg or ""), c
+    c = classify.classify("fatal: reference is not a tree: deadbeef\n", rung="L0")
+    assert c.arg == "deadbeef", c
+
+@check("envspec M6: rocker/r-ver bases install from the P3M binary mirror for their Ubuntu release, source CRAN as fallback; other R bases source-only")
+def _r_p3m():
+    import envspec
+    assert envspec.r_repos("rocker/r-ver:4.4.1@sha256:" + "a" * 64) == ["https://p3m.dev/cran/__linux__/jammy/latest", "https://cloud.r-project.org"]
+    assert envspec.r_repos("rocker/r-ver:4.5.0") == ["https://p3m.dev/cran/__linux__/noble/latest", "https://cloud.r-project.org"]
+    assert envspec.r_repos("r-base:4.4.1") == ["https://cloud.r-project.org"]
+    import dataclasses as _dc
+    s = _dc.replace(spec(), base_image="rocker/r-ver:4.4.1", pkg_manager="renv", pkg_specs=["deSolve", "testthat"])
+    txt = render(s).text
+    assert "p3m.dev/cran/__linux__/jammy" in txt and "HTTPUserAgent" in txt and "ENVBUILD_R_NOT_INSTALLED" in txt, txt
+
+@check("driver M6: the build budget is per package manager -- R gets its own key or x3, pip the base figure; the deadline rule follows it")
+def _d_build_budget():
+    import configparser as _cp, dataclasses as _dc
+    cfg = _cp.ConfigParser(); cfg.read_dict({"budgets": {"build_timeout_s": "600", "verify_timeout_s": "300", "l3_timeout_max_s": "1800"}})
+    assert driver.build_timeout_s(cfg, spec()) == 600
+    assert driver.build_timeout_s(cfg, _dc.replace(spec(), pkg_manager="renv")) == 1800
+    assert driver.build_timeout_s(cfg, _dc.replace(spec(), pkg_manager="mamba")) == 1200
+    cfg.set("budgets", "build_timeout_renv_s", "2400")
+    assert driver.build_timeout_s(cfg, _dc.replace(spec(), pkg_manager="renv")) == 2400
+    assert driver.attempt_deadline_s(cfg, _dc.replace(spec(), pkg_manager="renv")) == 2400 + 600 + 1800 + 180
+
+@check("memory: a verified verdict is remembered per model; a failed one is not; recall returns the spec, command and L3 timeout; forget drops it")
+def _mem_roundtrip():
+    import memory, tempfile as _tf, dataclasses as _dc
+    out = _tf.mkdtemp()
+    s = _dc.replace(spec(), l3_timeout_s=1200, pkg_specs=["numpy==2.0.0"])
+    state = {"model_id": "bench:x", "job_id": "job-1", "code_revision": "abc", "command": "python run.py", "entrypoint_source": "annotation",
+             "best": {"rung": "L3", "spec": s.to_dict(), "image_digest": "sha256:" + "1" * 64, "lockfile_sha256": "sha256:" + "2" * 64}}
+    assert memory.remember(out, state, {"status": "failed"}) is None and memory.recall(out, "bench:x") is None
+    p = memory.remember(out, state, {"status": "verified", "run": {"run_id": "r1"}, "charged_attempts": 4})
+    assert p and p.exists()
+    e = memory.recall(out, "bench:x")
+    assert e["command"] == "python run.py" and e["l3_timeout_s"] == 1200 and e["job_id"] == "job-1" and e["charged_attempts"] == 4
+    assert EnvSpec.from_dict(e["spec"]).pkg_specs == ["numpy==2.0.0"]
+    assert memory.recall(out, "bench:other") is None
+    assert memory.forget(out, "bench:x") and memory.recall(out, "bench:x") is None
+
+@check("driver memory: init drafts from the remembered spec (spec_source=memory), keeps the evidence draft alongside, and --no-memory ignores it")
+def _d_init_memory():
+    import memory, tempfile as _tf, types as _ty, dataclasses as _dc, configparser as _cp
+    out = _tf.mkdtemp(); root = _repo({"run.py": "print(1)\n", "requirements.txt": "numpy\n"})
+    remembered = _dc.replace(spec(), pkg_specs=["numpy==1.26.4", "scipy==1.13.0"], l3_timeout_s=900)
+    memory.remember(out, {"model_id": "bench:m", "job_id": "job-prev", "code_revision": "zzz", "command": "python run.py", "entrypoint_source": "annotation",
+                          "best": {"rung": "L3", "spec": remembered.to_dict(), "image_digest": None, "lockfile_sha256": None}},
+                    {"status": "verified", "run": {"run_id": "r0"}, "charged_attempts": 3})
+    cfg = _cp.ConfigParser(); cfg.read_dict(driver.DEFAULTS) if hasattr(driver, "DEFAULTS") else None
+    cfg = driver.load_config(None) if hasattr(driver, "load_config") else cfg
+    cfg.set("paths", "outputs", out)
+    captured = {}
+    saved_emit, saved_resolve = driver.emit, baseselect.resolve_digest
+    driver.emit = lambda d: captured.update(d)
+    baseselect.resolve_digest = lambda *a, **k: "sha256:" + "a" * 64
+    try:
+        args = _ty.SimpleNamespace(repo=str(root), annotation=None, model_id="bench:m", job_id="job-t1", no_memory=False)
+        driver.cmd_init(args, cfg)
+        assert captured["spec_source"] == "memory" and captured["memory"]["job_id"] == "job-prev" and captured["memory"]["same_revision"] is False
+        assert captured["draft_spec"]["pkg_specs"] == ["numpy==1.26.4", "scipy==1.13.0"] and captured["draft_spec"]["l3_timeout_s"] == 900
+        assert captured["draft_from_evidence"]["pkg_specs"] == ["numpy"], captured["draft_from_evidence"]["pkg_specs"]
+        st = driver.load_state(cfg, "job-t1"); assert st["spec_source"] == "memory" and st["spec"]["l3_timeout_s"] == 900
+        captured.clear()
+        args = _ty.SimpleNamespace(repo=str(root), annotation=None, model_id="bench:m", job_id="job-t2", no_memory=True)
+        driver.cmd_init(args, cfg)
+        assert captured["spec_source"] == "evidence" and captured["draft_spec"]["pkg_specs"] == ["numpy"] and captured["memory"] is None
+    finally:
+        driver.emit, baseselect.resolve_digest = saved_emit, saved_resolve
+
+@check("builder: the Kaniko pod declares cpu/memory/ephemeral-storage requests and limits (namespace LimitRange defaults of 256Mi kill a build); config.ini [builder] overrides per key")
+def _b_resources():
+    import builder as _b, configparser as _cp
+    class C: namespace = "ns"
+    bb = _b.K8sBuilder("job-x", C(), "reg", "pvc", "/work")
+    m = bb._pod_manifest("p", "reg/envbuild:t", "/work/context", 600)
+    r = m["spec"]["containers"][0]["resources"]
+    assert set(r) == {"requests", "limits"} and r["limits"]["ephemeral-storage"] == _b.BUILD_RESOURCES["limits"]["ephemeral-storage"], r
+    cfg = _cp.ConfigParser(); cfg.read_dict({"builder": {"limit_memory": "16Gi", "request_ephemeral": "", "limit_ephemeral": "64Gi"}})
+    r2 = _b.resources_from_config(cfg, "builder", _b.BUILD_RESOURCES)
+    assert r2["limits"]["memory"] == "16Gi" and r2["limits"]["ephemeral-storage"] == "64Gi" and r2["requests"]["ephemeral-storage"] == _b.BUILD_RESOURCES["requests"]["ephemeral-storage"], r2
+
+# ---------------------------------------------------------------- rerun 6 (rev 4.14) layer
+
+@check("ladder H24: a distribution with no top-level module (intel-cmplr-lib-rt, mkl) is not probed at L1 and passes")
+def _l_no_module_dist():
+    import subprocess as _sp
+    env = {**os.environ, "ENVBUILD_PROBE": ladder._L1_PROBE, "ENVBUILD_DISTS": "pyyaml,no-such-dist-xyz", "ENVBUILD_MODS": "pyyaml=yaml"}
+    r = _sp.run([sys.executable, "-c", ladder._RUNNER], env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 1 and "no-such-dist-xyz" in r.stderr
+    block = ladder._L1_PROBE.split("mods = top_level(dist) or")[1]
+    assert re.search(r"if not mods:\s*\n(?:\s*#.*\n)*\s*continue", block), block[:400]
+
+@check("driver H26: the entry's runner is a dependency -- `pytest` for a pytest entry (c302 StartError 128), testthat + DESCRIPTION Suggests for an R test entry (epidemics, epimodel)")
+def _d_runner_deps():
+    assert driver.runner_deps("pytest -q", "pip", {}) == [("pytest", "entry: pytest runner")]
+    assert driver.runner_deps("python -m pytest tests", "pip", {})[0][0] == "pytest"
+    assert driver.runner_deps("python run.py", "pip", {}) == []
+    ev = {"r": {"suggests": ["testthat", "knitr", "socialmixr"]}}
+    deps = [d for d, _ in driver.runner_deps("Rscript -e 'testthat::test_local()'", "renv", ev)]
+    assert deps[0] == "testthat" and "socialmixr" in deps and "knitr" in deps, deps
+    assert driver.runner_deps("Rscript scripts/run.R", "renv", ev) == []
+
+@check("evidence: DESCRIPTION Suggests are parsed separately from Depends/Imports/LinkingTo")
+def _e_suggests():
+    root = _repo({"DESCRIPTION": "Package: ep\nImports: Rcpp, deSolve\nLinkingTo: Rcpp\nSuggests: testthat (>= 3.0), knitr, deSolve\n", "R/a.R": ""})
+    ev = evidence.scan(root)
+    assert ev["r"]["suggests"] == ["knitr", "testthat"], ev["r"]
+    assert "deSolve" in ev["r"]["deps"] and "testthat" not in ev["r"]["deps"]
+
+@check("evidence H27: heavy/alternative-backend optional groups (`sim`, `gpu`, `all`) stay out of the draft and are recorded; `dev`/`demo`/`viz` stay in")
+def _e_optional_groups():
+    root = _repo({"pyproject.toml": '[project]\nname="m"\nversion="0.1"\ndependencies=["numpy"]\n'
+                                    '[project.optional-dependencies]\nsim=["pbg-mem3dg","pbg-readdy"]\ndemo=["plotly"]\ndev=["pytest"]\ngpu=["cupy"]\n', "m/__init__.py": ""})
+    ev = evidence.scan(root); d = ev["python"]["declared_deps"]
+    assert "plotly" in d and "pytest" in d and "pbg-mem3dg" not in d and "cupy" not in d, d
+    assert set(ev["python"]["optional_groups_skipped"]) == {"sim", "gpu"}, ev["python"]["optional_groups_skipped"]
+
+@check("builder: Kaniko's working directory is on the work claim (--kaniko-dir), not the container root filesystem")
+def _b_kaniko_dir():
+    import builder as _b
+    class C: namespace = "ns"
+    m = _b.K8sBuilder("job-x", C(), "reg", "pvc", "/work")._pod_manifest("p", "reg/envbuild:t", "/work/context", 600)
+    args = m["spec"]["containers"][0]["args"]
+    assert any(a.startswith("--kaniko-dir=/work/kaniko") or a == "--kaniko-dir=" + _b._POD_WORK + "/kaniko" for a in args), args
+
+@check("driver: choose_entry prefers a documented script over a test runner when both are repo examples (viva-mgen: README has `pytest` and a study run)")
+def _d_choose_script_over_tests():
+    ev = {"examples": [{"command": "pytest", "source": "README.md", "tier": "smoke", "placeholders": False},
+                       {"command": "python workspace/studies/fig2-growth/sims/run.py", "source": "README.md", "tier": "smoke", "placeholders": False}]}
+    cmd, src, corr = driver.choose_entry({}, ev, [])
+    assert cmd.startswith("python workspace/") and src == "repo_example", (cmd, src)
+    cmd2, _, _ = driver.choose_entry({}, {"examples": ev["examples"][:1]}, [])
+    assert cmd2 == "pytest"
+    assert driver.is_test_runner("Rscript -e 'testthat::test_local()'") and driver.is_test_runner("python -m pytest -q") and not driver.is_test_runner("python run.py tests/data.csv")
+    assert driver.entry_tier("python -m pytest", "repo_example") == "tests" and driver.entry_tier("python run.py", "annotation") == "headline"
 
 # ---------------------------------------------------------------- report
 if __name__ == "__main__":

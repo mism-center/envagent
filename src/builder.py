@@ -157,6 +157,30 @@ def match_kaniko_step(logs: str, steps: list[Step]) -> Step | None:
     return match_step(last_text, steps)
 
 
+# Defaults sized for a scientific Python/R image build: the base image unpacked
+# plus a compiled dependency or two. Ephemeral storage is the limit Kaniko hits
+# first (it extracts every layer to its own filesystem); the memory limit covers
+# pip's resolver, a Rcpp/Eigen compile, and Kaniko's own snapshotting.
+BUILD_RESOURCES = {
+    "requests": {"cpu": "1", "memory": "2Gi", "ephemeral-storage": "8Gi"},
+    "limits": {"cpu": "4", "memory": "8Gi", "ephemeral-storage": "32Gi"},
+}
+
+
+def resources_from_config(cfg, section: str, defaults: dict) -> dict:
+    """`<section>` keys `request_cpu`, `request_memory`, `request_ephemeral`,
+    `limit_cpu`, `limit_memory`, `limit_ephemeral` override `defaults`; an
+    unset key keeps the default. Values are Kubernetes quantities verbatim."""
+    out = {"requests": dict(defaults["requests"]), "limits": dict(defaults["limits"])}
+    keymap = {"cpu": "cpu", "memory": "memory", "ephemeral": "ephemeral-storage"}
+    for kind, plural in (("request", "requests"), ("limit", "limits")):
+        for short, res in keymap.items():
+            key = f"{kind}_{short}"
+            if cfg.has_option(section, key) and cfg.get(section, key).strip():
+                out[plural][res] = cfg.get(section, key).strip()
+    return out
+
+
 class K8sBuilder:
     """One Kaniko Pod per attempt. Talks to the API server; passes bytes on a PVC."""
 
@@ -166,10 +190,18 @@ class K8sBuilder:
                  kaniko_image: str = "gcr.io/kaniko-project/executor:v1.23.2",
                  docker_config_secret: str = "envbuild-registry-auth",
                  insecure_registry: bool = False, flat_registry: bool = False,
-                 cache_repo: str = "", labels: dict[str, str] | None = None):
+                 cache_repo: str = "", labels: dict[str, str] | None = None,
+                 resources: dict | None = None):
         self.job_id = job_id
         self.client = client
         self.registry = registry.rstrip("/")
+        # Pod resources for the build container. A namespace LimitRange that
+        # defaults to 250m/256Mi/256Mi ephemeral kills Kaniko outright: it
+        # unpacks every base layer into the container filesystem, so
+        # ephemeral-storage is the binding constraint, then memory for pip's
+        # resolver and compilers. Set from config.ini [builder]; see
+        # BUILD_RESOURCES for the defaults.
+        self.resources = resources or BUILD_RESOURCES
         # Kaniko layer cache. Keyed by instruction text + parent layer digest,
         # so it is safe to share across jobs: two specs with the same apt layer
         # on the same base reuse it, and a changed pkg line misses. Empty = off
@@ -234,6 +266,14 @@ class K8sBuilder:
             f"--context=dir://{context}",
             f"--destination={name}",
             f"--digest-file={_POD_WORK}/digest.txt",
+            # Kaniko's own working directory (layer tarballs it snapshots, the
+            # local cache) goes on the work claim, not the container's root
+            # filesystem: that roughly halves ephemeral-storage use. The
+            # extracted image filesystem itself still lives at `/` and counts
+            # as ephemeral -- Kaniko cannot redirect that; a namespace whose
+            # ephemeral quota is below the unpacked image needs a volume-backed
+            # builder (BuildKit rootless), not a bigger number here.
+            f"--kaniko-dir={_POD_WORK}/kaniko",
         ]
         if self.cache_repo:
             args += ["--cache=true", f"--cache-repo={self.cache_repo}", "--cache-copy-layers=false"]
@@ -277,6 +317,7 @@ class K8sBuilder:
                     "image": self.kaniko_image,
                     "args": args,
                     "volumeMounts": mounts,
+                    "resources": self.resources,
                 }],
                 "volumes": volumes,
             },

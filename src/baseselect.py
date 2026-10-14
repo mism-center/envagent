@@ -134,7 +134,10 @@ def select(evidence: dict, annotation: dict | None = None) -> BaseChoice:
 
     if evidence.get("conda"):
         kind, keys = "conda_env", [evidence["conda"].get("file", "environment.yml")]
-    elif declared.startswith("r") or evidence.get("r") or langs.get("r"):
+    # One stray .R file in a Python repo is not an R model (covasim: 193 .py,
+    # 1 .R -> rocker base, zero pkg_specs). R by file count only when R
+    # dominates; a DESCRIPTION or the annotation still decides outright.
+    elif declared.startswith("r") or evidence.get("r") or langs.get("r", 0) > max(langs.get("python", 0), langs.get("julia", 0)):
         kind, keys = "r", ["DESCRIPTION" if evidence.get("r") else "*.R"]
     elif declared == "julia" or evidence.get("julia") or langs.get("julia"):
         kind, keys = "julia", ["Project.toml"]

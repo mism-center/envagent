@@ -1,0 +1,227 @@
+holdout:
+  schema: envbuild-holdout/1
+  created: '2026-09-24'
+  protocol: run each model ONCE on one harness image with no fixes between models; then sort every non-success into harness-bug
+    / new-general-mechanism / repo-defect / rule-table-entry; report the fraction verified untouched
+  annotation: metadata-package/ produced by the platform annotator before the run
+  models:
+  - id: bench:viva-tumor-tcell
+    repo: https://github.com/vivarium-collective/viva-tumor-tcell
+    branch: main
+    sha: 30e417325687afc30ebcfa2cb89ce90246319560
+    language: HTML
+    size_mb: 142.8
+    pushed: '2026-09-24'
+    family: 'process-bigraph port of tumor-tcell; pyproject; README: pytest'
+    draft_expectation: verified
+    draft_example: pytest
+    source: vivarium-collective
+  - id: bench:viva-cpm
+    repo: https://github.com/vivarium-collective/viva-cpm
+    branch: main
+    sha: 2fda7a8d3009738d2f47cc9c42a01e853928e3c5
+    language: HTML
+    size_mb: 85.7
+    pushed: '2026-09-24'
+    family: "Rust core via maturin/pyo3 \u2014 compiled extension family, never tested; uv.lock"
+    draft_expectation: probe
+    draft_example: null
+    source: vivarium-collective
+  - id: bench:viva-mgen
+    repo: https://github.com/vivarium-collective/viva-Mgen
+    branch: main
+    sha: 6a258f185df7a7a7302df0ddf82300fbc20191cf
+    language: HTML
+    size_mb: 97.5
+    pushed: '2026-09-23'
+    family: 'Karr 2012 whole-cell reproduction; pyproject; README: pytest'
+    draft_expectation: verified
+    draft_example: pytest
+    source: vivarium-collective
+  - id: bench:viva-munk
+    repo: https://github.com/vivarium-collective/Viva-munk
+    branch: main
+    sha: 8852919fb4ad74b502f31ebe5af8edd4929f8658
+    language: HTML
+    size_mb: 795.6
+    pushed: '2026-09-24'
+    family: 'pymunk wrapper; 800 MB repo; README: python -m viva_munk.experiments.test_suite'
+    draft_expectation: verified
+    draft_example: python -m viva_munk.experiments.test_suite
+    source: vivarium-collective
+  - id: bench:viva-membrane-actin-composite
+    repo: https://github.com/vivarium-collective/viva-membrane-actin-composite
+    branch: main
+    sha: 75c33f12f47d8acc173e034bd9b415075846d3c1
+    language: HTML
+    size_mb: 17.5
+    pushed: '2026-09-23'
+    family: "composite of two compiled sims (mem3dg, readdy \u2014 conda-only packages?); uv.lock"
+    draft_expectation: probe
+    draft_example: python demo/demo_report.py
+    source: vivarium-collective
+  - id: bench:viva-artistoo
+    repo: https://github.com/vivarium-collective/viva-artistoo
+    branch: main
+    sha: 279638ffcbd8bdc1a563d13ebb47f039200381ab
+    language: Python
+    size_mb: 9.9
+    pushed: '2026-09-23'
+    family: "wrapper for a JS CPM run via node \u2014 needs a second runtime"
+    draft_expectation: probe
+    draft_example: python demo/demo_report.py
+    source: vivarium-collective
+  - id: bench:viva-yalla
+    repo: https://github.com/vivarium-collective/viva-yalla
+    branch: main
+    sha: 4264734260be9b0bcde9ead5ef8722cb92412f8b
+    language: Python
+    size_mb: 4.3
+    pushed: '2026-09-23'
+    family: NumPy port, pure Python; Dockerfile shipped
+    draft_expectation: verified
+    draft_example: python demo/demo_report.py
+    source: vivarium-collective
+  - id: bench:viva-simbio
+    repo: https://github.com/vivarium-collective/viva-simbio
+    branch: main
+    sha: 41e3d5caa88e2c23c416ed25dabd93e2a67e0e95
+    language: Python
+    size_mb: 6.3
+    pushed: '2026-09-23'
+    family: CRN simulator wrapper; uv.lock; Dockerfile
+    draft_expectation: verified
+    draft_example: python demo/demo_report.py
+    source: vivarium-collective
+  - id: bench:viva-amici
+    repo: https://github.com/vivarium-collective/viva-amici
+    branch: main
+    sha: 7ab0413e43bccd8db5b391acc9a112d5d254157e
+    language: Python
+    size_mb: 4.7
+    pushed: '2026-09-23'
+    family: "AMICI compiles ODE models with a C++ toolchain at run time \u2014 build-deps family"
+    draft_expectation: probe
+    draft_example: python demo/demo_report.py
+    source: vivarium-collective
+  - id: bench:viva-biofilm
+    repo: https://github.com/vivarium-collective/viva-biofilm
+    branch: main
+    sha: d4eac5d7e9accc311964c76e2cb38facd9fb5aa1
+    language: HTML
+    size_mb: 45.5
+    pushed: '2026-09-23'
+    family: 'Rust individual-based biofilm; README: pytest'
+    draft_expectation: probe
+    draft_example: pytest
+    source: vivarium-collective
+  - id: bench:covasim
+    repo: https://github.com/InstituteforDiseaseModeling/covasim
+    branch: main
+    sha: fd749822fcd423e847fc542c4926674b834504be
+    language: Python
+    size_mb: 40.6
+    pushed: '2026-09-08'
+    family: Python epi ABM; pyproject; examples/ directory, no README command
+    draft_expectation: verified
+    draft_example: null
+    source: outside
+  - id: bench:starsim
+    repo: https://github.com/starsimhub/starsim
+    branch: main
+    sha: 3521adb4dda5a76d43ec38f5e8cb55deab08ece9
+    language: Python
+    size_mb: 194.4
+    pushed: '2026-09-02'
+    family: Python ABM framework; pyproject; tests/
+    draft_expectation: verified
+    draft_example: null
+    source: outside
+  - id: bench:physicell
+    repo: https://github.com/MathCancer/PhysiCell
+    branch: master
+    sha: 69a23dbe7eaac4f41dc9548ad85072eff7921a03
+    language: C++
+    size_mb: 1058.6
+    pushed: '2026-09-24'
+    family: "C++ `make` build, 1 GB; sample projects \u2014 C++ toolchain family"
+    draft_expectation: probe
+    draft_example: make
+    source: outside
+  - id: bench:epimodel
+    repo: https://github.com/EpiModel/EpiModel
+    branch: main
+    sha: 0c96feca076047be964f37378ed3ddba2f2b4b3f
+    language: R
+    size_mb: 41.7
+    pushed: '2026-09-22'
+    family: "R package, CRAN deps only (DESCRIPTION) \u2014 like mbmm without renv"
+    draft_expectation: verified
+    draft_example: null
+    source: outside
+  - id: bench:epidemics
+    repo: https://github.com/epiverse-trace/epidemics
+    branch: main
+    sha: ac11c6fd15483f5a9fa2f053b714d04dd3c407b7
+    language: R
+    size_mb: 39.0
+    pushed: '2026-09-01'
+    family: R package with Rcpp compiled code
+    draft_expectation: probe
+    draft_example: null
+    source: outside
+  - id: bench:covid-sim
+    repo: https://github.com/mrc-ide/covid-sim
+    branch: master
+    sha: b719de9df5909f8fc47753dd1d2baf89fc415943
+    language: C++
+    size_mb: 107.8
+    pushed: '2023-02-21'
+    family: C++ CMake, ships a Dockerfile; last push 2023
+    draft_expectation: probe
+    draft_example: make
+    source: outside
+  - id: bench:c302
+    repo: https://github.com/OpenWorm/c302
+    branch: master
+    sha: 6cd861f8ca4d3241ee9cf4627884caa930dab53c
+    language: Python
+    size_mb: 64.5
+    pushed: '2026-08-25'
+    family: Python + NeuroML; simulation needs jNeuroML (Java) or NEURON
+    draft_expectation: probe
+    draft_example: python c302/c302_Pharyngeal.py
+    source: outside
+  - id: bench:biosimulators_tellurium
+    repo: https://github.com/BioSimulators/Biosimulators_tellurium
+    branch: dev
+    sha: c53b699587616a1874cba63312b264d04e12eca1
+    language: Python
+    size_mb: 4.5
+    pushed: '2025-01-08'
+    family: pip package with Dockerfile; SBML simulator wrapper; default branch `dev`
+    draft_expectation: verified
+    draft_example: null
+    source: outside
+  - id: bench:covid19model
+    repo: https://github.com/ImperialCollegeLondon/covid19model
+    branch: master
+    sha: fcc30e2b8d046ddf3ef10dfc222e42b5cd732622
+    language: Stan
+    size_mb: 66.4
+    pushed: '2021-03-29'
+    family: "conda environment.yml + R/Stan \u2014 conda family, never tested; archived-in-practice (2021)"
+    draft_expectation: probe
+    draft_example: null
+    source: outside
+  - id: bench:catalyst-jl
+    repo: https://github.com/SciML/Catalyst.jl
+    branch: master
+    sha: f1c28edf10901233307dd8a27020a0312bafbebe
+    language: Julia
+    size_mb: 339.6
+    pushed: '2026-09-24'
+    family: "Julia \u2014 unsupported toolchain; the honest verdict is `escalated`"
+    draft_expectation: control:escalated
+    draft_example: null
+    source: outside

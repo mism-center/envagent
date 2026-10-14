@@ -1,0 +1,56 @@
+# Kaniko admission smoke test -- "is Kaniko allowed to run in this namespace?"
+#
+# Stage 1 (this file): build a trivial Dockerfile with --no-push. It answers the
+# admission question alone: Kaniko runs as root with a writable root filesystem
+# and no extra capabilities; a namespace under Pod Security "restricted" rejects
+# it at admission, "baseline" admits it. No registry credentials needed.
+#
+#   kubectl -n mism-test apply -f deploy/kaniko-smoke.yaml
+#   kubectl -n mism-test get pod envbuild-kaniko-smoke -w        # Pending->Running->Succeeded (~1-2 min: pulls python:3.12-slim)
+#   kubectl -n mism-test logs envbuild-kaniko-smoke | tail -5
+#   kubectl -n mism-test get ns mism-test -o jsonpath='{.metadata.labels}'    # PSA labels, if any
+#   kubectl -n mism-test delete -f deploy/kaniko-smoke.yaml
+#
+# Stage 2 (only if stage 1 succeeds): remove --no-push, add
+#   --destination=docker.io/mismplatform/envbuild:kaniko-smoke
+# and mount Secret envbuild-registry-auth at /kaniko/.docker (see agent-job.yaml).
+# A push failure there is a credentials/egress question, not an admission one.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envbuild-kaniko-smoke-ctx
+  labels: {app: envbuild}
+data:
+  Dockerfile: |
+    FROM python:3.12-slim
+    RUN echo kaniko-smoke > /etc/kaniko-smoke && python -c "print('kaniko ok')"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: envbuild-kaniko-smoke
+  labels: {app: envbuild}
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor:v1.23.2
+      args:
+        - --context=dir:///workspace
+        - --dockerfile=/workspace/Dockerfile
+        - --no-push
+        - --verbosity=info
+      # Deliberately NO securityContext: that is exactly what src/builder.py
+      # emits for the real build pod, so admission here predicts admission
+      # there. If this is rejected under Pod Security "restricted", the error
+      # names the fields (runAsNonRoot, seccompProfile, capabilities) -- Kaniko
+      # cannot satisfy runAsNonRoot, so the namespace must be "baseline".
+      resources:
+        requests: {cpu: "500m", memory: "1Gi"}
+        limits: {memory: "4Gi"}
+      volumeMounts:
+        - {name: ctx, mountPath: /workspace}
+  volumes:
+    - name: ctx
+      configMap: {name: envbuild-kaniko-smoke-ctx}

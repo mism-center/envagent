@@ -1,0 +1,17 @@
+envbuild rev 4.14: hold-out sprint (M1 git deps, M6 R binaries, cross-job memory), rerun-6 layer, build-pod resources, state docs
+
+Harness (191 offline checks, pyflakes clean):
+- M1: git-sourced deps rendered as `name @ git+url@<sha>` (lock sha overrides pyproject branch); git added to the image
+- M6: P3M binary CRAN for rocker bases; per-manager build budget (build_timeout_<mgr>_s)
+- cross-job memory (src/memory.py): verified specs recalled at init as the first draft; spec_source on every row
+- H22/R3/toolchain_readonly; H24 module-less dists skipped at L1; H25 --classified-by agent; H26 runner deps
+  (pytest / testthat + Suggests) added at init; H27 heavy optional extras left out of the draft
+- chooser prefers a documented script over a test runner; scorer: test suites never count, alternate shipped
+  examples count (alternate_example_ok), success_from_memory reported
+- Kaniko pod resources (config [builder] request_*/limit_*) and --kaniko-dir on the work claim
+- harness: pi pinned (PI_VERSION), provider id resolved from `pi --list-models`, run.agent_runtime recorded
+
+Benchmarks: hold-out passes 3-5 (5/19, 4/19, 4/19; 0 false-verified), single-repo rerun aks-rerun-6 (viva-mgen
+verified via git deps), reports in docs/. Ground truth: alternate_example_ok, policy notes, viva-mgen example corrected.
+
+Docs: STATE.md (team summary), HANDOFF.md (resume checklist + 13 open items), pass reports, change log through rev 4.14.

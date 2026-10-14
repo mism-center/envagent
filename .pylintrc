@@ -1,0 +1,32 @@
+# Project conventions, not exceptions to hide behind. Each block says why.
+[MAIN]
+# src/ modules import each other flat; driver.py bootstraps sys.path.
+init-hook = "import sys; sys.path.insert(0, 'src')"
+
+[FORMAT]
+# Comments here carry the reasoning that makes the code reviewable. 100 is the
+# limit for code; prose that runs a few over is not worth breaking mid-sentence.
+max-line-length = 110
+
+[MESSAGES CONTROL]
+disable =
+    # driver.py and the test suite must extend sys.path before importing src/.
+    wrong-import-position,
+    # Protocol stubs and one-line dataclass helpers do not each need a docstring;
+    # the module and class docstrings carry the contract.
+    missing-function-docstring,
+    missing-class-docstring,
+    # patch.apply is a flat dispatch table: one branch per typed action. Splitting
+    # it into twelve methods would hide the enum it is implementing.
+    too-many-return-statements,
+    # The loop legitimately carries a lot of state through one function.
+    too-many-locals,
+    too-many-branches,
+    too-many-statements,
+    too-many-arguments,
+    too-many-positional-arguments,
+    too-many-instance-attributes,
+    # Protocol implementations have no extra public surface by design.
+    too-few-public-methods,
+    # Builder and Verifier deliberately share shape; that is the seam.
+    duplicate-code,

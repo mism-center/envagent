@@ -277,7 +277,32 @@ def installable_specs(manager: str, specs: list[str]) -> list[str]:
     return list(specs)
 
 
-def _install_cmd(manager: str, specs: list[str]) -> str:
+# Posit Public Package Manager serves prebuilt CRAN binaries per Ubuntu release.
+# rocker/r-ver images are Ubuntu LTS; a binary install takes seconds where a
+# from-source compile of e.g. `sf`/`igraph`/`RcppEigen` dependents takes longer
+# than the whole build budget (hold-out: epimodel, covid19model -> TIMEOUT x5).
+# Non-rocker R bases fall back to source CRAN. Keep this table in step with
+# rocker's release matrix.
+_P3M = {"jammy": "https://p3m.dev/cran/__linux__/jammy/latest",
+        "noble": "https://p3m.dev/cran/__linux__/noble/latest",
+        "focal": "https://p3m.dev/cran/__linux__/focal/latest"}
+_ROCKER_CODENAME = (("4.5", "noble"), ("4.4", "jammy"), ("4.3", "jammy"), ("4.2", "jammy"), ("4.1", "focal"), ("4.0", "focal"))
+
+
+def r_repos(base_image: str) -> list[str]:
+    """CRAN repos for an R base: a P3M binary mirror first when the base is a
+    known rocker/r-ver release, then source CRAN as the fallback."""
+    m = re.search(r"rocker/r-ver:(\d+\.\d+)", base_image or "")
+    repos = []
+    if m:
+        for prefix, codename in _ROCKER_CODENAME:
+            if m.group(1) == prefix:
+                repos.append(_P3M[codename]); break
+    repos.append("https://cloud.r-project.org")
+    return repos
+
+
+def _install_cmd(manager: str, specs: list[str], base_image: str = "") -> str:
     quoted = " ".join(shlex.quote(s) for s in specs)
     if manager == "pip":
         return f"pip install {quoted}"
@@ -289,8 +314,17 @@ def _install_cmd(manager: str, specs: list[str]) -> str:
     # Add renv::restore (needs the lockfile in the context) when R models actually
     # show up in the corpus -- no point guessing the shape before then.
     vec = ", ".join(f'"{s.replace(chr(34), "")}"' for s in specs)
-    return (f"Rscript -e 'install.packages(c({vec}), "
-            f'repos="https://cloud.r-project.org", destdir="{_R_DOWNLOAD_DIR}")\'')
+    # install.packages() warns and exits 0 when a package fails to install
+    # (hold-out 4: `ADD_PKG testthat` rebuilt an image that still had no
+    # testthat). The build must fail on the package that did not land, by name.
+    repos = ", ".join(f'"{r}"' for r in r_repos(base_image))
+    # `HTTPUserAgent` carrying the R version is what makes P3M serve binaries.
+    return (f"Rscript -e 'options(HTTPUserAgent = sprintf(\"R/%s R (%s)\", getRversion(), "
+            f"paste(getRversion(), R.version[\"platform\"], R.version[\"arch\"], R.version[\"os\"]))); "
+            f"pkgs <- c({vec}); install.packages(pkgs, "
+            f'repos=c({repos}), destdir="{_R_DOWNLOAD_DIR}"); '
+            f'miss <- setdiff(pkgs, rownames(installed.packages())); '
+            f'if (length(miss)) {{ cat("ENVBUILD_R_NOT_INSTALLED:", miss, "\\n"); quit(status = 1) }}\'')
 
 
 def _run_with_cache(cache: str | None, command: str) -> str:
@@ -309,8 +343,8 @@ def _run_with_cache(cache: str | None, command: str) -> str:
             f" && {command}")
 
 
-def _pkg_run(manager: str, specs: list[str]) -> str:
-    return _run_with_cache(_PKG_CACHE.get(manager), _install_cmd(manager, specs))
+def _pkg_run(manager: str, specs: list[str], base_image: str = "") -> str:
+    return _run_with_cache(_PKG_CACHE.get(manager), _install_cmd(manager, specs, base_image))
 
 
 def dedupe(items) -> list[str]:
@@ -353,9 +387,24 @@ def render(spec: EnvSpec, labels: dict[str, str] | None = None) -> RenderedDocke
     # ENV: hygiene defaults, then the spec's own vars (spec wins), then
     # extra_path folded into the manager's path variable.
     env = {**_HYGIENE_ENV.get(spec.pkg_manager, {}), **spec.env_vars}
+    if spec.install_mode == "installed" and spec.pkg_manager in ("pip", "conda", "mamba"):
+        # The installed package is the truth; the source tree at code_path is
+        # data. Without this, cwd (= workdir = code_path) is first on sys.path
+        # and a package with a compiled extension imports its own uncompiled
+        # source copy (hold-out: viva-cpm `cannot import name 'cpm_core'`,
+        # viva-biofilm `partially initialized module`). Python >= 3.11.
+        env.setdefault("PYTHONSAFEPATH", "1")
     if spec.mount.extra_path:
         var = _PATH_VAR.get(spec.pkg_manager, "PYTHONPATH")
         parts = list(spec.mount.extra_path)
+        if spec.install_mode == "installed":
+            # The installed package is what runs. Putting code_path (or any
+            # directory under it) on the import path re-creates the shadowing
+            # PYTHONSAFEPATH removes (hold-out 3: viva-cpm, viva-biofilm --
+            # `extra_path=['/model']` from the mounted-mode draft survived the
+            # switch and rendered PYTHONPATH=/model).
+            cp = spec.mount.code_path.rstrip("/")
+            parts = [p for p in parts if not (p == cp or p.startswith(cp + "/"))]
         if env.get(var):
             parts.append(env[var])
         env[var] = ":".join(dedupe(parts))
@@ -363,8 +412,14 @@ def render(spec: EnvSpec, labels: dict[str, str] | None = None) -> RenderedDocke
         body = " \\\n    ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(env.items()))
         emit("env", "env_vars", f"ENV {body}")
 
-    if spec.apt_packages:
-        emit("apt", "apt_packages", _apt_run(sorted(dedupe(spec.apt_packages))))
+    # A `name @ git+https://...` spec needs a git binary in the image (slim bases
+    # ship none). Added here, attributed to pkg_specs, so the agent never has to
+    # discover "git: command not found" as a MISSING_SYSTEM_LIB.
+    apt = list(spec.apt_packages)
+    if spec.pkg_manager == "pip" and any(" @ git+" in s for s in spec.pkg_specs) and "git" not in apt:
+        apt.append("git")
+    if apt:
+        emit("apt", "apt_packages", _apt_run(sorted(dedupe(apt))))
 
     boot = _BOOTSTRAP.get(spec.pkg_manager)
     if boot:
@@ -375,7 +430,7 @@ def render(spec: EnvSpec, labels: dict[str, str] | None = None) -> RenderedDocke
 
     to_install = installable_specs(spec.pkg_manager, dedupe(spec.pkg_specs))
     if to_install:
-        emit("pkg", "pkg_specs", _pkg_run(spec.pkg_manager, to_install))
+        emit("pkg", "pkg_specs", _pkg_run(spec.pkg_manager, to_install, spec.base_image))
 
     if spec.post_install:
         emit("cmd", "post_install", _run_script(spec.post_install))

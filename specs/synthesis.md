@@ -74,6 +74,11 @@ has already pinned the declared dependencies to the author's locked versions
 (`annotation_findings` carries `lockfile_honoured`). Keep those pins. Loosening
 one is a `UNPIN_PKG` repair with a reason, not a synthesis choice.
 
+**Git-sourced dependencies (M1)** — a `[tool.uv.sources]`/Poetry `{git = …}`
+entry becomes `name @ git+url@<sha>` with the sha from the lockfile; without a
+lockfile the branch/tag is used and the finding says `UNPINNED`. The renderer
+adds `git` to the image. Path/workspace/url sources still escalate.
+
 **Undeclared imports** — `evidence.python.undeclared_imports` lists third-party
 modules the package's own code imports that no dependency list or lockfile
 provides (scripts/tests/examples are not scanned; imports available under

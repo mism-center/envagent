@@ -18,6 +18,8 @@ no rule fires.
 | `MOUNT_CONTRACT_ERROR` | L2/L3 | `FIX_MOUNT_CONTRACT` | agent retry |
 | `BUILD_MODE_MISMATCH` | L2/L3 | `SWITCH_INSTALL_MODE` | agent retry |
 | `BASE_IMAGE_MISMATCH` | L0 | `CHANGE_BASE_IMAGE` | agent retry |
+| `TIMEOUT` (build killed at `build_timeout_s`; no deadline text — the driver's `build_deadline` rule) | L0 | none in this revision: compile from source outran the budget → `failed`, note the package | dead-letter |
+| `UNKNOWN_DISTRIBUTION` | L0 | `REMOVE_PKG` (an undeclared-import guess) · none for a git/path-sourced dependency → escalate | agent retry |
 | `ENTRYPOINT_UNKNOWN` | L2 | — | back to submitter |
 | `MISSING_DATA_FILE` | L3 | — | back to submitter |
 | `LICENSE_REQUIRED` | L0/L3 | — | back to submitter |
@@ -32,6 +34,11 @@ no rule fires.
 
 A failure lives in exactly one of three planes, and the plane decides who acts:
 
+- pip's `No matching distribution found for X (from versions: none)` is **not** a
+  substrate failure by itself: the index has no project named X. It is
+  `UNKNOWN_DISTRIBUTION` unless a genuine network marker (`Temporary failure`,
+  `NewConnectionError`, `Could not fetch URL`, …) is in the same log. The first
+  hold-out pass closed 7 of 19 jobs as `error` before this distinction existed.
 - **Substrate** (`INFRA_UNAVAILABLE`): DNS, a package index, a registry, pod
   scheduling, a pull rate limit. Nothing in the spec is implicated. The driver
   re-runs the *same* spec, does not charge the attempt, and refuses `patch` until

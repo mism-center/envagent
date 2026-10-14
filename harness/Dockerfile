@@ -22,7 +22,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /usr/local/bin/
 # fewer way for an LLM-driven loop to do something nobody asked for.
 
 # Install pi coding agent globally (still as root).
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+# Pinned: an unpinned install picked up pi 1.0.4 on 2026-10-06 and the provider id
+# `azure-openai-responses` became `azure`; all 20 hold-out Jobs of that pass died
+# before `init`. Bump deliberately, and note the agent version in the pass report --
+# the agent runtime is part of what a benchmark pass measures.
+ARG PI_VERSION=1.0.4
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION}
 
 # Pi reads global config (settings, system-prompt bridge) from this dir.
 ENV PI_CODING_AGENT_DIR=/opt/pi

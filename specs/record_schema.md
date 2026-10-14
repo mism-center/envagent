@@ -148,6 +148,11 @@ not the build — which is exactly what makes `envbuild reverify` cheap: replay
 L2–L3 against the existing image, skip L0 and L1 entirely. `attempts` counts
 `search_seconds` is `duration_s` net of infra time and of `l3_seconds` (time the
 example itself ran at L3) — the number the wall-clock budget actually saw.
+**`spec_source`** (attempt rows and verdicts) — `evidence` (drafted from the repo scan), `memory`
+(attempt 1 started from a prior verified spec for this model; verdicts carry **`memory_job_id`**),
+`search` (every later attempt). The scorer reports successes-from-memory separately. **`annotation_corrections[]`**
+on the verdict is the finalized list (field, was, now, evidence, outcome) also written to `annotation-patch.yaml`.
+
 `attempts` counts every attempt including uncharged infra retries; `charged_attempts` is what the
 budget saw.
 

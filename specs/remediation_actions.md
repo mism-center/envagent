@@ -8,12 +8,13 @@ attempt record.
 | Action | `--arg` format | Effect on the EnvSpec |
 |---|---|---|
 | `ADD_APT_PKG` | `libxml2-dev`, or a family `libgl1 libglib2.0-0 libxcb1` | append to `apt_packages` (one entry per package; still one action) |
-| `ADD_PKG` | `scipy` or `scipy>=1.10` | append to `pkg_specs` |
-| `PIN_PKG` | `numpy==1.26.4` (constraint required) | replace the existing entry for that distribution |
+| `ADD_PKG` | `scipy`, `scipy>=1.10`, or a family of bare names `BH Rcpp RcppEigen` | append to `pkg_specs` (one entry per name; still one action) |
+| `REMOVE_PKG` | `libsbml` | drop the matching entry from `pkg_specs` (for `UNKNOWN_DISTRIBUTION`; say why) |
+| `PIN_PKG` (refused for R specs: `install.packages()` takes names only) | `numpy==1.26.4` (constraint required) | replace the existing entry for that distribution |
 | `UNPIN_PKG` | `numpy` | strip the constraint, keep the name |
 | `CHANGE_INTERPRETER_VERSION` | `3.10` | rewrite the base tag, keep the flavour suffix; digest re-resolved |
 | `CHANGE_BASE_IMAGE` | `ubuntu:24.04` | replace the base; digest re-resolved |
-| `SWITCH_INSTALLER` | `mamba` | `pkg_manager` |
+| `SWITCH_INSTALLER` | `mamba` | `pkg_manager` — refused unless the base image provides it; the message names the `CHANGE_BASE_IMAGE` to make first |
 | `SWITCH_INSTALL_MODE` | `installed` | `install_mode` |
 | `SET_ENV_VAR` | `PYTHONPATH=/model/src` | `env_vars[k] = v` |
 | `ADD_PRE_INSTALL_CMD` | a shell line | append to `pre_install` |

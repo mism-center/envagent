@@ -57,10 +57,12 @@ import evidence as evidence_mod
 import examples as examples_mod                      # noqa: E402
 import ladder as ladder_mod                          # noqa: E402
 import logs as logs_mod                              # noqa: E402
+import memory as memory_mod                          # noqa: E402
 import normalize                                     # noqa: E402
 import patch as patch_mod                            # noqa: E402
 import record                                        # noqa: E402
 from builder import K8sBuilder                      # noqa: E402
+import builder as builder_mod                        # noqa: E402
 from errors import InfraError                        # noqa: E402
 from envspec import EnvSpec, MountContract, render   # noqa: E402
 import k8s                                           # noqa: E402
@@ -139,6 +141,9 @@ def run_provenance(cfg) -> dict:
         "harness_image": cfg.get("run", "harness_image"),
         "agent_model": cfg.get("run", "agent_model"),
         "agent_provider": cfg.get("run", "agent_provider"),
+        # The agent runtime is part of what a pass measures: pi 0.99 -> 1.0.4
+        # changed a provider id and killed a whole pass. Set by the entrypoint.
+        "agent_runtime": os.environ.get("AI_RUNTIME_VERSION", ""),
         "kaniko_image": cfg.get("builder", "kaniko_image"),
         "cache_repo": cfg.get("builder", "cache_repo"),
     }
@@ -270,6 +275,7 @@ def make_builder(cfg, state) -> K8sBuilder:
         labels={"io.envbuild.model_id": state["model_id"],
                 "io.envbuild.code_revision": state.get("code_revision", "unknown"),
                 "io.envbuild.run_id": cfg.get("run", "run_id")},
+        resources=builder_mod.resources_from_config(cfg, "builder", builder_mod.BUILD_RESOURCES),
     )
     b.attempt = state["attempt"]          # keep image tags aligned with attempts
     return b
@@ -290,6 +296,24 @@ def make_verifier(cfg, state) -> K8sVerifier:
 
 
 # ---------------------------------------------------------------- init
+# uv.lock writes `https://host/org/repo.git?branch=main#<sha>` / `?rev=<x>#<sha>`;
+# pyproject gives `https://host/org/repo#<branch>`. The fragment wins over the query.
+_GIT_SRC = re.compile(r"^(?:git:)?(?:git\+)?(https?://[^\s#@?]+?)(?:\.git)?(?:\?[^#\s]*)?(?:[#@]([\w./\-]+))?$")
+
+
+def git_direct_ref(name: str, source: str | None) -> str | None:
+    """`https://github.com/org/repo#<sha>` (uv.lock) or
+    `https://github.com/org/repo` (pyproject `{git = ...}`) -> `git+https://github.com/org/repo@<sha>`.
+    None for path/workspace/url sources, which pip cannot install from a mount."""
+    if not source or source.startswith(("path:", "workspace", "url:", "editable", "virtual", "directory")):
+        return None
+    m = _GIT_SRC.match(source.strip())
+    if not m or not re.search(r"github\.com|gitlab\.com|bitbucket\.org|codeberg\.org|\.git$", source):
+        return None
+    url, ref = m.group(1), m.group(2)
+    return f"git+{url}" + (f"@{ref}" if ref else "")
+
+
 def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -> EnvSpec:
     """A first spec from evidence alone. The agent refines it per specs/synthesis.md.
 
@@ -308,15 +332,56 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
     # keeps the spec readable (11 pins, not 123) and every pin attributable.
     lock = ev.get("lockfile") or {}
     draft_spec.lock_pins = []
+    # Names pip cannot fetch from the index by name: git/path/url sources in
+    # pyproject and non-registry entries in the lockfile. They stay in the spec
+    # (the declaration is real) but are never version-pinned, and the classifier
+    # learns their origin so an L0 `No matching distribution` names the cause.
+    vcs = dict((ev.get("python") or {}).get("vcs_sources") or {})
+    for key, src in (lock.get("sources") or {}).items():
+        if not src.startswith("registry:"):
+            # The lockfile's source carries the resolved sha; it overrides the
+            # pyproject's branch/tag form of the same git source.
+            if src.startswith("git:") or key not in vcs:
+                vcs[key] = src
+    draft_spec.vcs_deps = vcs
+    # M1: a git source becomes a PEP 508 direct reference pip can install:
+    # `name @ git+https://host/org/repo@<sha>`. The sha comes from the lockfile
+    # (`source = { git = "...#<sha>" }`), else a branch/tag from pyproject, else
+    # the default branch -- recorded as `vcs_unpinned` so the record says the
+    # build is not reproducible until a lockfile pins it. Path/workspace/url
+    # sources still cannot be installed from a mounted repo and escalate.
+    draft_spec.vcs_installed, draft_spec.vcs_unpinned = {}, []
+    rewritten = []
+    for d in deps:
+        key = re.sub(r"[-_.]+", "-", patch_mod.req_name(d) or "").lower() if isinstance(d, str) else ""
+        ref = git_direct_ref(key, vcs.get(key)) if key in vcs else None
+        if ref:
+            extras = re.search(r"\[[^\]]*\]", d)
+            rewritten.append(f"{patch_mod.req_name(d)}{extras.group(0) if extras else ''} @ {ref}")
+            draft_spec.vcs_installed[key] = ref
+            tail = ref.split("git+", 1)[1]
+            if "@" not in tail or not re.fullmatch(r"[0-9a-f]{7,40}", tail.rsplit("@", 1)[1]):
+                draft_spec.vcs_unpinned.append(key)      # branch/tag or nothing: not a reproducible build
+        else:
+            rewritten.append(d)
+    deps = rewritten
+    draft_spec.pkg_origin = {}
+    for d in deps:
+        key = re.sub(r"[-_.]+", "-", patch_mod.req_name(d) or "").lower() if isinstance(d, str) else ""
+        if key:
+            draft_spec.pkg_origin[key] = (f"git:{draft_spec.vcs_installed[key]}" if key in draft_spec.vcs_installed
+                                          else f"vcs:{vcs[key]}" if key in vcs
+                                          else ("annotation" if ann.get("declared_deps") else "declared"))
     if choice.pkg_manager == "pip" and lock.get("versions") and lock.get("usable", True):
         pinned = []
         for d in deps:
             name = patch_mod.req_name(d) if isinstance(d, str) else ""
             key = re.sub(r"[-_.]+", "-", name).lower() if name else ""
-            if key and key in lock["versions"] and "==" not in d:
+            if key and key in lock["versions"] and "==" not in d and key not in vcs and " @ " not in d:
                 extras = re.search(r"\[[^\]]*\]", d)
                 new_d = f"{name}{extras.group(0) if extras else ''}=={lock['versions'][key]}"
                 draft_spec.lock_pins.append((d, new_d))
+                draft_spec.pkg_origin[key] = "lock"
                 d = new_d
             pinned.append(d)
         deps = pinned
@@ -333,6 +398,7 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
                 have.add(key)
                 deps.append(dist)
                 draft_spec.undeclared.append((mod, dist))
+                draft_spec.pkg_origin[key] = "undeclared"
     # A local module living directly at repo root or under src/ needs that
     # directory on the import path -- the entry point's own file is often
     # nested a few levels below it, so relying on "the entry file's own
@@ -342,6 +408,12 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
     # per repo.
     mount = MountContract()
     local_dirs = sorted(set((ev.get("local_module_paths") or {}).values()))
+    if choice.install_mode == "installed":
+        # Installed mode: the package comes from site-packages; code_path on the
+        # import path would shadow it (H12b). Local modules outside the
+        # installed package are a SWITCH_INSTALL_MODE/extra_path repair later,
+        # with evidence, not a draft default.
+        local_dirs = []
     if local_dirs:
         mount = MountContract(**{
             **mount.to_dict(),
@@ -356,7 +428,7 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
     keep, dropped = [], []
     for d in deps:
         name = patch_mod.req_name(d) if isinstance(d, str) else ""
-        if (not isinstance(d, str) or " " in d.strip()
+        if (not isinstance(d, str) or (" " in d.strip() and " @ " not in d)      # `name @ git+url` is a valid PEP 508 spec
                 or classify_mod.UNSUPPORTED_TOOLS.match(name or d)):
             dropped.append(d)
         else:
@@ -398,6 +470,48 @@ def resolve_corrections(state: dict, reached: str, ok: bool, failure_class: str 
             c["outcome"] = "helped"
 
 
+_TESTS_CMD = re.compile(r"^\s*(pytest|py\.test|python -m pytest|make\s+(test|check)|R CMD check|"
+                        r"Rscript -e ['\"]?(testthat|devtools)::|npm test|julia .*Pkg\.test|tox|nox)\b")
+
+
+_TEST_RUNNER = re.compile(r"^\s*(pytest|py\.test|python -m pytest|tox|nox|make (test|check)|R CMD check|"
+                          r"Rscript -e ['\"]?(testthat|devtools)::|julia .*Pkg\.test|npm test|cargo test)\b")
+
+
+def is_test_runner(command: str) -> bool:
+    return bool(_TEST_RUNNER.search(command or ""))
+
+
+def runner_deps(command: str, pkg_manager: str, ev: dict) -> list[tuple[str, str]]:
+    """Packages the entry command itself requires: the test runner it names,
+    and for an R test entry the DESCRIPTION's Suggests (that is what tests
+    import). Returned as (spec, origin) pairs."""
+    out: list[tuple[str, str]] = []
+    c = command or ""
+    if pkg_manager == "pip":
+        if re.search(r"(^|\s)(pytest|py\.test)\b|-m pytest\b", c):
+            out.append(("pytest", "entry: pytest runner"))
+        if re.search(r"(^|\s)(tox|nox)\b", c):
+            out.append((c.split()[0], "entry: runner"))
+    if pkg_manager in ("renv", "pkg"):
+        if "testthat" in c or "devtools::test" in c or "R CMD check" in c:
+            out.append(("testthat", "entry: testthat runner"))
+            for s in (ev.get("r") or {}).get("suggests") or []:
+                out.append((s, "entry: DESCRIPTION Suggests (test entry)"))
+        if "devtools::" in c:
+            out.append(("devtools", "entry: devtools runner"))
+    return out
+
+
+def entry_tier(command: str, source: str | None) -> str:
+    """'headline' for the annotation's/README's example, 'tests' for a test suite."""
+    if not command:
+        return "none"
+    if _TESTS_CMD.search(command) or is_test_runner(command) or re.search(r"(^|[\s/])tests?/", command):
+        return "tests"
+    return "headline"
+
+
 def choose_entry(ann: dict, ev: dict, findings: list[dict]) -> tuple[str, str, dict | None]:
     """The command L3 runs, where it came from, and a correction record if the
     annotation's own entry was not usable.
@@ -413,8 +527,12 @@ def choose_entry(ann: dict, ev: dict, findings: list[dict]) -> tuple[str, str, d
     for cmd in entries:
         if cmd and cmd not in bad:
             return cmd, "annotation", None
-    smoke = next((e for e in (ev.get("examples") or [])
-                  if e["tier"] == "smoke" and not e.get("placeholders")), None)
+    # A test runner (`pytest`, `testthat::test_local()`) proves the environment,
+    # not the example (decision 2026-10-07): it is chosen only when the repo
+    # documents no script to run. viva-mgen's README has both; `pytest` came
+    # first and the run verified on tests only.
+    smokes = [e for e in (ev.get("examples") or []) if e["tier"] == "smoke" and not e.get("placeholders")]
+    smoke = next((e for e in smokes if not is_test_runner(e["command"])), None) or (smokes[0] if smokes else None)
     if smoke:
         return smoke["command"], "repo_example", {
             "field": "entry_points[0].command", "was": entries[0] if entries else None,
@@ -449,6 +567,22 @@ def cmd_init(args, cfg) -> None:
         die(str(exc), code=4)
 
     spec = draft_spec(ev, ann, choice, digest, builder_id(cfg))
+    draft_from_evidence = spec.to_dict()
+
+    # Cross-job memory: if this model verified before, start from that spec.
+    # Still a draft -- the ladder climbs from L0 -- but it turns a four-attempt
+    # search into one attempt, and makes the result independent of which
+    # repair the agent happens to pick first. `--no-memory` disables it.
+    spec_source, recalled = "evidence", None
+    if not getattr(args, "no_memory", False):
+        recalled = memory_mod.recall(cfg.get("paths", "outputs"), args.model_id or f"local:{Path(repo).name}")
+    if recalled:
+        try:
+            mspec = EnvSpec.from_dict(recalled["spec"])
+            mspec.builder_version = builder_id(cfg)
+            spec, spec_source = mspec, "memory"
+        except Exception as exc:                       # a stale schema is not a reason to fail init
+            recalled = {"error": f"unreadable memory entry: {exc}"}
 
     # The annotation's entry points, judged against what the repo itself ships.
     # Findings are deterministic and cost nothing; an unusable entry is replaced
@@ -467,6 +601,23 @@ def cmd_init(args, cfg) -> None:
                          "suggestion": None,
                          "detail": f"{len(draft_spec.lock_pins)} declared dependencies pinned to the repo's "
                                    f"lockfile: " + ", ".join(n for _, n in draft_spec.lock_pins[:8])})
+    if getattr(draft_spec, "vcs_installed", None):
+        findings.append({"code": "vcs_dependency_installed", "entry": None, "suggestion": None,
+                         "detail": "git-sourced dependencies rendered as pinned direct references: "
+                                   + ", ".join(f"{k} <- {v}" for k, v in list(draft_spec.vcs_installed.items())[:6])
+                                   + ("; UNPINNED (no sha in any lockfile; build not reproducible): "
+                                      + ", ".join(draft_spec.vcs_unpinned) if draft_spec.vcs_unpinned else "")})
+    left = {k: v for k, v in (getattr(draft_spec, "vcs_deps", None) or {}).items() if k not in (getattr(draft_spec, "vcs_installed", None) or {})}
+    if left:
+        findings.append({"code": "vcs_dependency", "entry": None, "suggestion": None,
+                         "detail": "declared from a path/workspace/url source, not the package index; this revision "
+                                   "cannot install it -- expect UNKNOWN_DISTRIBUTION at L0 and escalate: "
+                                   + ", ".join(f"{k} <- {v}" for k, v in list(left.items())[:6])})
+    skipped = (ev.get("python") or {}).get("optional_groups_skipped") or {}
+    if skipped:
+        findings.append({"code": "optional_groups_skipped", "entry": None, "suggestion": None,
+                         "detail": "heavy/alternative-backend extras left out of the draft; ADD_PKG from them only "
+                                   "when L3 asks: " + "; ".join(f"[{g}] {', '.join(v[:6])}" for g, v in skipped.items())})
     if getattr(draft_spec, "undeclared", None):
         findings.append({"code": "undeclared_imports", "entry": None, "suggestion": None,
                          "detail": "the package imports modules no dependency list or lockfile declares; "
@@ -474,7 +625,20 @@ def cmd_init(args, cfg) -> None:
                                    + ", ".join(f"{m} ({d})" for m, d in draft_spec.undeclared)})
     command, entry_source, correction = choose_entry(ann, ev, findings)
     corrections = [correction] if correction else []
+    if not command and recalled and recalled.get("command"):
+        command, entry_source = recalled["command"], "memory"
     entry = ladder_mod.entry_from_command(command)
+    # The runner the entry needs is a dependency nobody declares: `pytest`
+    # (installed mode baked `ENTRYPOINT ["pytest"]` into an image with no
+    # pytest -> StartError 128, c302), `testthat` (epidemics and epimodel each
+    # spent an attempt on `ADD_PKG testthat`). For an R test entry the
+    # DESCRIPTION's Suggests are what the tests import; add them too.
+    for dep, origin in runner_deps(command, spec.pkg_manager, ev):
+        if dep not in spec.pkg_specs and dep not in draft_spec.pkg_origin:
+            spec.pkg_specs = list(spec.pkg_specs) + [dep]
+            draft_spec.pkg_origin[re.sub(r"[-_.]+", "-", dep).lower()] = origin
+            findings.append({"code": "runner_dependency_added", "entry": command, "suggestion": dep,
+                             "detail": f"{dep} added to pkg_specs: {origin}"})
     # A script that opens files relative to its own directory needs that
     # directory as workdir. Derivable here, so derive it here -- circadian-clock
     # spent four jobs rediscovering this at L3.
@@ -495,6 +659,13 @@ def cmd_init(args, cfg) -> None:
         "started_at": time.time(),
         "attempt": 0,
         "spec": spec.to_dict(),
+        "spec_source": spec_source,
+        "memory": ({"job_id": recalled.get("job_id"), "run_id": recalled.get("run_id"),
+                    "code_revision": recalled.get("code_revision"),
+                    "same_revision": recalled.get("code_revision") == git_rev(repo),
+                    "charged_attempts_then": recalled.get("charged_attempts")}
+                   if recalled and "spec" in recalled else recalled),
+        "draft_from_evidence": draft_from_evidence,
         "entry": entry,
         "command": command,
         "entrypoint_source": entry_source,
@@ -509,6 +680,8 @@ def cmd_init(args, cfg) -> None:
         "patched_since_attempt": True,       # the draft counts as the first spec
         "closed": False,
         "local_modules": ev.get("local_modules") or [],
+        "pkg_origin": getattr(draft_spec, "pkg_origin", {}),
+        "source_tops": ev.get("source_tops") or [],
         "examples": ev.get("examples") or [],
         # The project's own interpreter constraint, for CHANGE_INTERPRETER_VERSION.
         "requires_python": (ev.get("python") or {}).get("requires_python"),
@@ -547,6 +720,13 @@ def cmd_init(args, cfg) -> None:
         "annotation_findings": findings,
         "annotation_corrections": corrections,
         "draft_spec": spec.to_dict(),
+        "spec_source": spec_source,
+        "memory": state["memory"],
+        "draft_from_evidence": draft_from_evidence if spec_source == "memory" else None,
+        "memory_note": (None if spec_source != "memory" else
+                        f"This spec verified for this model in job {state['memory']['job_id']} "
+                        f"({state['memory']['charged_attempts_then']} attempts then). Run `envbuild attempt` as-is first. "
+                        "If it fails, patch from there; `envbuild spec --set-spec` with `draft_from_evidence` resets to the evidence draft."),
         "warning": (None if command else
                     "No runnable entry point in the annotation or the repo: this job cannot "
                     "pass L2. Supply --annotation, or expect ENTRYPOINT_UNKNOWN."),
@@ -615,14 +795,26 @@ def l3_timeout_s(cfg, state) -> int:
     return min(int(float(declared) * 1.5) + 60, mx)
 
 
-def attempt_deadline_s(cfg) -> int:
+def build_timeout_s(cfg, spec) -> int:
+    """The build budget, per package manager. `build_timeout_s` is the pip
+    figure; R (CRAN from source when no binary exists) and conda (solver) get
+    `build_timeout_<manager>_s` when set, else a multiplier. Hold-out passes
+    1-5 recorded five R builds as TIMEOUT at the pip budget."""
+    base = cfg.getint("budgets", "build_timeout_s")
+    key = f"build_timeout_{spec.pkg_manager}_s"
+    if cfg.has_option("budgets", key):
+        return cfg.getint("budgets", key)
+    return base * {"renv": 3, "pkg": 3, "conda": 2, "mamba": 2}.get(spec.pkg_manager, 1)
+
+
+def attempt_deadline_s(cfg, spec=None) -> int:
     """Ceiling for one attempt end to end: the build pod, two probe pods, the
     L3 run at its maximum, and slack for scheduling, log fetch and registry
     reads. The pods' own `activeDeadlineSeconds` bound the containers; this
     bounds the *driver's* view of the attempt, so a 36 000 s row (seen once,
     under the old local backend) is recorded as TIMEOUT rather than as whatever
     the log said."""
-    return (cfg.getint("budgets", "build_timeout_s")
+    return ((build_timeout_s(cfg, spec) if spec is not None else cfg.getint("budgets", "build_timeout_s"))
             + 2 * cfg.getint("budgets", "verify_timeout_s")
             + cfg.getint("budgets", "l3_timeout_max_s") + 180)
 
@@ -665,7 +857,7 @@ def cmd_attempt(args, cfg) -> None:
     # The build context is a path, not a tar: the build pod mounts the same
     # models claim this process reads, so there is nothing to ship.
     try:
-        build = builder.build(spec, state["repo"], cfg.getint("budgets", "build_timeout_s"))
+        build = builder.build(spec, state["repo"], build_timeout_s(cfg, spec))
     except InfraError as exc:
         state["attempt"] -= 1                 # the attempt never happened
         _die_infra(cfg, state, exc)
@@ -713,13 +905,26 @@ def cmd_attempt(args, cfg) -> None:
                                     exit_code=exit_code, mount=spec.mount.to_dict(),
                                     install_mode=spec.install_mode,
                                     requires_python=state.get("requires_python"),
+                                    pkg_origin=state.get("pkg_origin") or {},
+                                    source_tops=state.get("source_tops") or (),
+                                    python_version=(re.search(r":(\d+\.\d+)", spec.base_image) or [None, None])[1],
                                     l3_timeout_s=(lad.notes or {}).get("l3_timeout_s") if build.ok else None)
-        if duration > attempt_deadline_s(cfg) and cls.failure_class in ("UNKNOWN", "INFRA_UNAVAILABLE"):
+        if (not build.ok and duration >= build_timeout_s(cfg, spec) - 5
+                and cls.failure_class == "UNKNOWN"):
+            # A Kaniko pod killed at activeDeadlineSeconds leaves no deadline
+            # text in its log (hold-out: epimodel, 602 s and 601 s, both
+            # recorded UNKNOWN). The duration says what the log cannot.
+            cls = classify_mod.Classification("TIMEOUT", classified_by="rule", rule="build_deadline",
+                                              evidence=f"build ran {duration:.0f}s >= build_timeout_s "
+                                                       f"{cfg.getint('budgets', 'build_timeout_s')}s; "
+                                                       f"the image did not finish compiling")
+            cls.routes_to = classify_mod.ROUTING["TIMEOUT"]
+        if duration > attempt_deadline_s(cfg, spec) and cls.failure_class in ("UNKNOWN", "INFRA_UNAVAILABLE"):
             # The attempt outlived every deadline it was given. Whatever the log
             # says, the row must say TIMEOUT.
             cls = classify_mod.Classification("TIMEOUT", classified_by="rule", rule="attempt_deadline",
                                               evidence=f"attempt ran {duration:.0f}s > "
-                                                       f"{attempt_deadline_s(cfg)}s")
+                                                       f"{attempt_deadline_s(cfg, spec)}s")
             cls.routes_to = classify_mod.ROUTING["TIMEOUT"]
     infra = bool(cls and cls.routes_to == "infra")
 
@@ -767,6 +972,9 @@ def cmd_attempt(args, cfg) -> None:
         # this is what a verified verdict refers to.
         "entrypoint_used": state.get("command") or None,
         "entrypoint_source": state.get("entrypoint_source"),
+        # "memory" on attempt 1 means the spec came from a prior verified job for
+        # this model; the scorer separates verified-from-memory from verified-by-search.
+        "spec_source": state.get("spec_source", "evidence") if attempt_no == 1 else "search",
         "l3_timeout_s": (lad.notes or {}).get("l3_timeout_s") if build.ok else None,
         # False when the substrate failed: the row is kept (the corpus should
         # show how often infra fails) but it does not count against the budget
@@ -977,7 +1185,7 @@ def cmd_patch(args, cfg) -> None:
     # Backfill the action onto the attempt row it responds to: the record is
     # only useful if the failure and the repair sit in the same row.
     _backfill_action(cfg, state, {"type": args.action, "arg": args.arg or None,
-                                  "why": args.why or "", "classified_by": args.classified_by})
+                                  "why": args.why or "", "classified_by": "llm" if args.classified_by == "agent" else args.classified_by})
 
     emit({"ok": True, "job_id": state["job_id"], "action": args.action, "arg": args.arg,
           "note": result.note, "rollback": rollback,
@@ -1121,11 +1329,20 @@ def _write_verdict(cfg, state, status: str, reason: str) -> dict:
         # reading of the repo -- with the outcome the ladder assigned it.
         "entrypoint_used": state.get("command") or None,
         "entrypoint_source": state.get("entrypoint_source"),
+        # "headline" = the annotation's or README's example; "tests" = a test
+        # suite the agent fell back to (`pytest`, `testthat::test_local()`,
+        # `make test`). A verified-on-tests job proves the environment, not the
+        # example; the scorer reports the two separately (hold-out 5: viva-yalla).
+        "entrypoint_tier": entry_tier(state.get("command") or "", state.get("entrypoint_source")),
         "annotation_findings": state.get("annotation_findings") or [],
         "annotation_corrections": finalize_corrections(state),
+        "spec_source": state.get("spec_source", "evidence"),
+        "memory_job_id": (state.get("memory") or {}).get("job_id") if isinstance(state.get("memory"), dict) else None,
     }
     write_annotation_patch(cfg, state, row["annotation_corrections"])
     written = record.write_verdict(cfg.get("paths", "outputs"), row)
+    if status == "verified":
+        memory_mod.remember(cfg.get("paths", "outputs"), state, row)
     state["closed"] = True
     save_state(cfg, state)
     return written
@@ -1134,6 +1351,16 @@ def _write_verdict(cfg, state, status: str, reason: str) -> dict:
 def cmd_verdict(args, cfg) -> None:
     state = load_state(cfg, args.job_id)
     already = state.get("closed")
+    last = state.get("last") or {}
+    if args.status == "error" and not already and state.get("attempt", 0) > 0 and not last.get("infra"):
+        # `error` means the SUBSTRATE failed. A model whose example outran
+        # l3_timeout_max_s (hold-out, viva-munk) or whose build broke is
+        # `failed`; one the loop cannot help is `escalated`. The verdict is the
+        # dataset's label -- an `error` here hides a real result.
+        die(f"status 'error' is reserved for substrate failures; the last attempt failed with "
+            f"{last.get('failure_class')} at {last.get('failed_rung')}, which is the model's or the "
+            f"spec's result. Use --status failed (the example did not pass) or escalated "
+            f"(no typed repair applies).", code=3)
     try:
         row = _write_verdict(cfg, state, args.status, args.reason or "") if not already else None
     finally:
@@ -1183,6 +1410,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--job-id")
     s.set_defaults(fn=cmd_init)
 
+    s.add_argument("--no-memory", action="store_true",
+                   help="draft from evidence even if a verified spec is remembered for this model")
+
+    s = sub.add_parser("forget", help="drop the remembered verified spec for a model")
+    s.add_argument("--model-id", required=True)
+    s.set_defaults(fn=lambda a, c: emit({"ok": True, "forgot": memory_mod.forget(c.get("paths", "outputs"), a.model_id)}))
+
     s = sub.add_parser("spec", help="replace the job's EnvSpec with an agent-authored one")
     s.add_argument("--job-id", required=True)
     s.add_argument("--set-spec", required=True, help="path to an EnvSpec JSON file")
@@ -1199,7 +1433,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--arg", default="")
     s.add_argument("--why", default="", help="one line of justification, recorded")
     s.add_argument("--failure-class", help="required when you classified by LLM")
-    s.add_argument("--classified-by", choices=("rule", "llm"), default="rule")
+    s.add_argument("--classified-by", choices=("rule", "llm", "agent"), default="rule",
+                   help="`agent` is an alias of `llm` (the taxonomy says 'agent retry')")
     s.set_defaults(fn=cmd_patch)
 
     s = sub.add_parser("reverify", help="replay the ladder against an existing image")

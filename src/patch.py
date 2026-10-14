@@ -10,6 +10,7 @@ re-resolved -- changing the base image invalidates the pin.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import shlex
 from typing import NamedTuple
@@ -19,6 +20,9 @@ from envspec import EnvSpec, MountContract
 ACTIONS = (
     "ADD_APT_PKG",
     "ADD_PKG",
+    # Take a name back out of pkg_specs: the index has no such project
+    # (UNKNOWN_DISTRIBUTION). The usual case is our own undeclared-import guess.
+    "REMOVE_PKG",
     "PIN_PKG",
     "UNPIN_PKG",
     "CHANGE_INTERPRETER_VERSION",
@@ -124,6 +128,14 @@ def forbidden_pre_install(cmd: str) -> str | None:
     return None
 
 
+# installer -> (base-image pattern that provides it, the base to suggest).
+_INSTALLER_BASE = {
+    "mamba": (r"micromamba|mambaforge|miniforge", "mambaorg/micromamba:1.5"),
+    "conda": (r"miniconda|anaconda|miniforge|mambaforge|micromamba", "continuumio/miniconda3:24.3.0-0"),
+    "renv":  (r"rocker/|r-base|r-ver", "rocker/r-ver:4.4.1"),
+}
+
+
 def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
     """Apply `action` with `arg`. Raises PatchError on an unusable argument."""
     if action not in ACTIONS:
@@ -163,14 +175,38 @@ def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
         return PatchResult(new, False, f"apt += {' '.join(fresh)}")
 
     if action == "ADD_PKG":
-        if any(req_name(s) == req_name(arg) for s in new.pkg_specs):
+        # One action may name a family when the rule table does (R's plural
+        # "dependencies ... are not available"): space-separated bare names.
+        items = arg.split() if (" " in arg and not re.search(r"[<>=!~;\[]", arg)) else [arg]
+        added = []
+        for it in items:
+            if any(req_name(s) == req_name(it) for s in new.pkg_specs):
+                continue
+            new.pkg_specs.append(it)
+            added.append(it)
+        if not added:
             raise PatchError(f"package {arg!r} already present")
-        new.pkg_specs.append(arg)
-        return PatchResult(new, False, f"pkg += {arg}")
+        return PatchResult(new, False, f"pkg += {' '.join(added)}")
+
+    if action == "REMOVE_PKG":
+        name = req_name(arg)
+        keep = [s for s in new.pkg_specs if req_name(s) != name]
+        if len(keep) == len(new.pkg_specs):
+            raise PatchError(f"package {arg!r} is not in pkg_specs")
+        new.pkg_specs = keep
+        return PatchResult(new, False, f"pkg -= {name}")
 
     if action == "PIN_PKG":
         if not re.search(r"[=<>~!]", arg):
             raise PatchError("PIN_PKG needs a version constraint, e.g. numpy==1.26.4")
+        if new.pkg_manager in ("renv", "pkg"):
+            # install.packages() takes names, not versions: `BH==1.75.0` became
+            # an R package literally called that (hold-out: epidemics). Version
+            # pinning for R needs remotes::install_version, which the renderer
+            # does not emit in this revision.
+            raise PatchError("PIN_PKG is not supported for R specs in this revision: install.packages() "
+                             "takes names only. ADD_PKG the bare name, or escalate if a specific "
+                             "version is required.")
         new.pkg_specs = _replace_req(new.pkg_specs, arg)
         return PatchResult(new, False, f"pin {arg}")
 
@@ -202,6 +238,13 @@ def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
             raise PatchError(f"installer must be one of {_INSTALLERS}")
         if arg == new.pkg_manager:
             raise PatchError(f"already using {arg}")
+        # The installer must exist in the base. `micromamba install` on
+        # python:3.11-slim is exit 127 (hold-out, biosimulators_tellurium); the
+        # renderer cannot bootstrap a package manager, so the base has to carry it.
+        need = _INSTALLER_BASE.get(arg)
+        if need and not re.search(need[0], new.base_image):
+            raise PatchError(f"{arg} is not available in {new.base_image.split('@')[0]}; "
+                             f"CHANGE_BASE_IMAGE {need[1]} first (the base provides the installer)")
         new.pkg_manager = arg
         return PatchResult(new, False, f"installer -> {arg}")
 
@@ -211,7 +254,14 @@ def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
         if arg == new.install_mode:
             raise PatchError(f"already in {arg} mode")
         new.install_mode = arg
-        return PatchResult(new, False, f"install_mode -> {arg}")
+        note = f"install_mode -> {arg}"
+        if arg == "installed" and new.mount.extra_path:
+            cp = new.mount.code_path.rstrip("/")
+            kept = tuple(p for p in new.mount.extra_path if not (p == cp or p.startswith(cp + "/")))
+            if kept != tuple(new.mount.extra_path):
+                new.mount = dataclasses.replace(new.mount, extra_path=kept)
+                note += "; extra_path entries under code_path dropped (installed package is what runs)"
+        return PatchResult(new, False, note)
 
     if action == "SET_ENV_VAR":
         k, v = _kv(arg, action)

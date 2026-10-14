@@ -31,7 +31,15 @@ provider="${AI_PROVIDER:-}"
 model="${AI_MODEL:-}"
 if [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
   : "${AZURE_OPENAI_BASE_URL:?AZURE_OPENAI_API_KEY is set but AZURE_OPENAI_BASE_URL is not}"
-  provider="${provider:-azure-openai-responses}"
+  # pi 1.0 renamed the provider id `azure-openai-responses` -> `azure`. Ask the
+  # installed pi which one it knows rather than guessing from a version string.
+  if [ -z "$provider" ]; then
+    if pi --list-models 2>/dev/null | awk '{print $1}' | grep -qx azure; then
+      provider=azure
+    else
+      provider=azure-openai-responses
+    fi
+  fi
   model="${model:-gpt-5.6-luna}"
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   model="${model:-anthropic/claude-opus-4-5}"
@@ -49,7 +57,7 @@ echo "envbuild: provider=${provider:-<pi default>} model=${model}" >&2
 # The driver stamps these onto every attempt/verdict row as `run.agent_model`
 # and `run.agent_provider` -- so the RESOLVED values must be in the environment
 # the agent's shell inherits, not just in this script's locals.
-export AI_MODEL="$model" AI_PROVIDER="${provider:-pi-default}"
+export AI_MODEL="$model" AI_PROVIDER="${provider:-pi-default}" AI_RUNTIME_VERSION="pi $(pi --version 2>/dev/null | head -1)"
 
 run() {
   pi --approve --stream=all \

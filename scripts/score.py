@@ -150,9 +150,26 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
         if g.get("buildable"):
             ok = v.get("status") == "verified"
             t["honesty"] = honesty(v, rows) if ok else []
-            t["success"] = ok and not t["honesty"]
+            # A verification on a test suite the agent fell back to proves the
+            # environment, not the repo's example. It counts as success only
+            # when the ground truth says the example IS the tests (or allows an
+            # alternate); otherwise it is reported separately as `verified_tests`.
             t["ran_ground_truth"] = _norm(v.get("entrypoint_used")) == _norm(g.get("example"))
-            t["attribution"] = None if t["success"] else attribute(v, rows, g)
+            tier = v.get("entrypoint_tier") or ("tests" if re.search(r"^\s*(pytest|make test|Rscript -e .testthat)", v.get("entrypoint_used") or "") else "headline")
+            gt_example_is_tests = bool(re.search(r"^\s*(pytest|make test|Rscript -e .testthat)", g.get("example") or ""))
+            # Decision 2026-10-07: a shipped demo script other than the README's
+            # counts when `alternate_example_ok` is true; a test suite never
+            # counts as the example (unless the ground truth's example IS the tests).
+            t["verified_tests"] = ok and not t["honesty"] and tier == "tests" and not gt_example_is_tests
+            t["verified_alternate"] = (ok and not t["honesty"] and tier == "headline" and not t["ran_ground_truth"]
+                                       and bool(g.get("example")))
+            if t["verified_alternate"] and not g.get("alternate_example_ok"):
+                # an alternate script ran clean but the ground truth has not approved one:
+                # counted as success (it is a shipped example), flagged for the human
+                t["flags"] = ["alternate example: set alternate_example_ok in ground truth to confirm"]
+            t["success"] = ok and not t["honesty"] and not t["verified_tests"]
+            t["spec_source"] = v.get("spec_source") or "evidence"
+            t["attribution"] = None if t["success"] else ("policy:alternate_example" if t["verified_tests"] else attribute(v, rows, g))
             t["correct"] = t["success"]
         else:
             t["success"] = None
@@ -182,6 +199,12 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
         "false_verified_trials": [{"job_id": t["job_id"], "model": t["model"], "why": t["honesty"]} for t in false_verified],
         "attribution": dict(attr),
         "corrected_annotation_and_succeeded": sum(1 for t in b if t["success"] and t["corrections"]),
+        "verified_tests_only": sum(1 for t in b if t.get("verified_tests")),
+        # Cross-job memory: how many successes started from a remembered spec.
+        # Report both; a pass where every success is from memory has measured
+        # recall, not search.
+        "success_from_memory": sum(1 for t in b if t["success"] and t.get("spec_source") == "memory"),
+        "success_on_alternate_example": sum(1 for t in b if t["success"] and t.get("verified_alternate")),
         "median_charged_attempts": _median([t["charged_attempts"] for t in b if t["charged_attempts"] is not None]),
         "infra_retries_total": sum(t["infra_retries"] or 0 for t in trials),
         "llm_fallback_share": (sum(t["llm_fallbacks"] for t in trials)
@@ -230,6 +253,9 @@ def main(argv=None) -> int:
     print(f"  verdict correctness  {_pct(res['verdict_correctness'])}")
     print(f"  false-verified       {res['false_verified']}" + ("   <-- MUST BE 0" if res["false_verified"] else ""))
     print(f"  succeeded after correcting the annotation: {res['corrected_annotation_and_succeeded']}")
+    print(f"  verified on a test suite only (not counted): {res['verified_tests_only']}")
+    print(f"  of the successes, started from memory:       {res['success_from_memory']}")
+    print(f"  of the successes, on an alternate shipped example: {res['success_on_alternate_example']}")
     print("\n  failure attribution (buildable, non-success):")
     for k, v in sorted(res["attribution"].items(), key=lambda kv: -kv[1]):
         print(f"    {k:14s} {v}")

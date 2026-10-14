@@ -91,11 +91,31 @@ for dist_name in [x for x in os.environ['ENVBUILD_DISTS'].split(',') if x]:
         errs.append('%s: PackageNotFoundError: distribution %r is not installed' % (dist_name, dist_name))
         continue
     mods = top_level(dist) or ([guess[dist_name]] if dist_name in guess else [])
-    for m in mods:
+    if not mods:
+        # Installed, but ships no Python module at all (intel-cmplr-lib-rt, mkl,
+        # nvidia-*-cu12: shared libraries only). Nothing to import; it passes.
+        continue
+    # top_level.txt can list vendored build directories that are not modules
+    # (amici: SuiteSparse, sundials). The distribution passes if its canonical
+    # module -- the name-derived one, or the known alias -- imports; every
+    # top-level name is tried only when there is no canonical candidate, and
+    # a failure is reported only when none of them imports.
+    canon = [m for m in mods if m.lower() in (dist_name.lower().replace('-', '_'), dist_name.lower().replace('-', ''), guess.get(dist_name, '').lower())]
+    tried, ok = [], False
+    for m in (canon or mods):
         try:
-            importlib.import_module(m)
+            importlib.import_module(m); ok = True
+            if canon: break
         except BaseException as e:
-            errs.append('%s (from %s): %s: %s' % (m, dist_name, type(e).__name__, e))
+            tried.append('%s (from %s): %s: %s' % (m, dist_name, type(e).__name__, e))
+    if canon and not ok:
+        for m in [x for x in mods if x not in canon]:
+            try:
+                importlib.import_module(m); ok = True; break
+            except BaseException as e:
+                tried.append('%s (from %s): %s: %s' % (m, dist_name, type(e).__name__, e))
+    if not ok and tried:
+        errs.extend(tried if not canon else tried[:1])
 if errs:
     sys.stderr.write('\\n'.join(errs) + '\\n')
     sys.exit(1)
@@ -325,7 +345,13 @@ def run_l2(verifier, image_ref: str, code_ref: str, spec: EnvSpec, entry: dict,
                             timeout_s, env=env)
     entry_file = entry.get("value") or ""
     path = entry_file if entry_file.startswith("/") else f"{spec.mount.code_path}/{entry_file}"
-    if spec.pkg_manager in ("renv", "pkg"):
+    # The probe follows the ENTRY's language, not the base image's package
+    # manager: a mixed repo (covid-sim: C++ core, R scripts, Python runner)
+    # drafted a rocker base and then had `python data/run_sample.py` parsed by
+    # R. A .py entry on a base without python fails with `python: not found`,
+    # which `no_interpreter` turns into the right base change.
+    is_r = entry_file.endswith((".R", ".r")) or (not entry_file.endswith(".py") and spec.pkg_manager in ("renv", "pkg"))
+    if is_r:
         return verifier.run(image_ref, code_ref,
                             ["Rscript", "-e", f'if (!file.exists("{path}")) '
                              f'{{cat("ENVBUILD_ENTRYPOINT_MISSING: {path}\\n"); quit(status=1)}}; '
@@ -356,6 +382,15 @@ def run_l3(verifier, image_ref: str, code_ref: str, spec: EnvSpec, command,
     env = {"ENVBUILD_INPUTS": spec.mount.input_path,
            "ENVBUILD_OUTPUTS": spec.mount.output_path}
     m = spec.mount
+    toks0 = quote_cmd(command or [])
+    if spec.install_mode == "installed" and toks0 and toks0[0] in ("pytest", "py.test"):
+        # pytest's default import mode inserts the test file's rootdir on
+        # sys.path, which puts the source tree back in front of the installed
+        # package -- the shadowing PYTHONSAFEPATH removed (hold-out 4,
+        # viva-biofilm at L3). importlib mode does not touch sys.path; the
+        # cache dir is pointed at the writable output volume.
+        env["PYTEST_ADDOPTS"] = (f"--import-mode=importlib -p no:cacheprovider "
+                                 f"--rootdir={m.code_path} --basetemp={m.output_path}/.pytest_tmp")
     if m.writable_copy:
         # Copy the read-only mount into the container's own filesystem and run
         # from the corresponding directory there. cp(1) is in every base we
@@ -368,6 +403,14 @@ def run_l3(verifier, image_ref: str, code_ref: str, spec: EnvSpec, command,
         copy_root = SCRATCH + m.code_path
         wd = copy_root + m.workdir[len(m.code_path):] if m.workdir.startswith(m.code_path) else m.workdir
         inner = resolve_command(command, m, anchor=copy_root)
+        # extra_path entries under code_path must point INTO the copy, or the
+        # image's PYTHONPATH keeps importing from the read-only mount and a
+        # module's __file__-relative writes land there (hold-out 5, starsim:
+        # `/model/tests/temp` read-only while rootdir was the copy).
+        moved = [copy_root + p[len(m.code_path):] if (p == m.code_path or p.startswith(m.code_path + "/")) else p
+                 for p in m.extra_path]
+        if moved and list(moved) != list(m.extra_path):
+            env["PYTHONPATH"] = ":".join(moved)
         cmd = ["sh", "-c", _WRITABLE_COPY_SH, m.code_path, copy_root, wd, m.output_path, *inner]
     else:
         cmd = resolve_command(command, m)
@@ -411,7 +454,7 @@ def climb(verifier, image_ref: str, code_ref: str, spec: EnvSpec, entry: dict,
         # verified L3 with `lockfile_sha256: null` for exactly this reason.
         result.notes["lockfile"] = parse_lockfile(r1.stdout) or parse_lockfile(r1.stderr)
 
-    if not (entry or {}).get("value"):
+    if not (entry or {}).get("value") and not command:
         # No declared entry point: fail fast rather than burning the budget on
         # a ladder that cannot be climbed.
         result.failed_at = "L2"
@@ -419,7 +462,17 @@ def climb(verifier, image_ref: str, code_ref: str, spec: EnvSpec, entry: dict,
         result.exit_code = 1
         return result
 
-    r2 = run_l2(verifier, image_ref, code_ref, spec, entry, verify_timeout_s)
+    if not (entry or {}).get("value"):
+        # A command with no script token -- `pytest`, `Rscript -e '...'`,
+        # `make test`, `julia -e '...'` -- has nothing for the import probe to
+        # parse. That is not a missing entry point (hold-out 3 reported it as
+        # one and four jobs died at L2 with correct environments). L2 is
+        # recorded as not probeable and the run itself is the test.
+        result.reached = "L2"
+        result.notes["l2_claim"] = "not probeable: the command names no script; L3 is the test"
+        r2 = RunResult(True, 0, "", "")
+    else:
+        r2 = run_l2(verifier, image_ref, code_ref, spec, entry, verify_timeout_s)
     result.stdout, result.stderr = r2.stdout, r2.stderr
     result.exit_code, result.timed_out = r2.exit_code, r2.timed_out
     if not r2.ok:

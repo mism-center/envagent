@@ -27,6 +27,7 @@ ATTEMPT_REQUIRED = (
     # rev 3: which run produced the row, whether it counts against the budget,
     # and what the image actually contained when it passed L1.
     "run", "charged", "lockfile_sha256",
+    "spec_source",                      # rev 4.12: evidence | memory | search
     # rev 4: what L3 ran and where the command came from.
     "entrypoint_used", "entrypoint_source",
 )
@@ -35,6 +36,7 @@ VERDICT_REQUIRED = (
     "image_digest", "code_revision", "envspec_hash", "failure_class",
     "routes_to", "duration_s", "ended_at", "reason",
     "run", "charged_attempts", "lockfile_sha256",
+    "spec_source", "memory_job_id",
     "entrypoint_used", "entrypoint_source", "annotation_corrections",
 )
 

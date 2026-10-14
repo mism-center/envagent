@@ -7,4 +7,7 @@ outputs/verdicts.jsonl
 outputs/jobs/
 runs/
 .claude
-
+# Cross-job memory is cluster state (lives on the work claim), not source.
+outputs/memory/
+# Office lock files
+~$*

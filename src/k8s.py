@@ -277,7 +277,13 @@ class Client:
                     continue
                 state = cs.get("state") or {}
                 if "terminated" in state:
-                    return int(state["terminated"].get("exitCode") or 0), ""
+                    term = state["terminated"]
+                    code = int(term.get("exitCode") or 0)
+                    # The reason travels with the code: an OOMKilled 137 with an
+                    # empty log is otherwise indistinguishable from "ran fine"
+                    # (hold-out 4: c302's L3 row had exit None and no text).
+                    note = "" if code == 0 else f"ENVBUILD_EXIT: container exited {code} ({term.get('reason') or 'Error'})"
+                    return code, note
                 waiting = state.get("waiting") or {}
                 if waiting.get("reason") in _FATAL_WAITING:
                     return None, (f"{waiting['reason']}: "

@@ -233,6 +233,15 @@ def is_command(command: str) -> bool:
         return False
     if re.fullmatch(r"(R|python3?|julia|Rscript|R -e|python -c|jupyter)\s*", c):
         return False
+    # Environment setup is not an example (hold-out 5, viva-cpm: init chose
+    # `python -m venv .venv && source .venv/bin/activate`).
+    if re.search(r"(^|&&|;)\s*(source|\.)\s+\S*activate\b|-m venv\b|\bconda (create|activate|env)\b|"
+                 r"^\s*(pip|uv|poetry|conda|mamba|npm|cargo)\s+(install|sync|add|lock)\b|^\s*(cd|export|git clone)\s", c):
+        return False
+    try:
+        shlex.split(c)
+    except ValueError:
+        return False          # unbalanced quote: a truncated README/CI line, not a command
     return True
 
 
@@ -305,6 +314,11 @@ def grounded(root: str | Path, command: str, examples: list[dict],
         return None
     f = _file_token(c)
     if f is None:
+        # R packages are run through inline expressions, not scripts:
+        # `Rscript -e 'testthat::test_local()'`, `Rscript -e 'devtools::check()'`.
+        # Grounded when the repo IS an R package (DESCRIPTION at root).
+        if re.match(r"Rscript -e ['\"]\S", c) and (root / "DESCRIPTION").exists():
+            return None
         return ("names no script in the repo and is not a documented example; "
                 "SET_ENTRYPOINT must be grounded in evidence.examples or an existing file")
     rel = f
@@ -312,6 +326,11 @@ def grounded(root: str | Path, command: str, examples: list[dict],
         rel = f[len(code_path.rstrip("/")) + 1:]
     elif f.startswith("/"):
         return f"{f} is an absolute path outside {code_path}; the model is mounted at {code_path}"
+    if any(ch in rel for ch in "*?["):
+        # A glob (`pytest test_*.py`, from CI) is grounded when it matches.
+        if not any(root.glob(rel)):
+            return f"{rel} matches no file in the repo"
+        return None
     if not (root / rel).exists():
         return f"{rel} does not exist in the repo"
     return None

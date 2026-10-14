@@ -29,6 +29,10 @@ ROUTING = {
     # The base has no interpreter for the model's language: the scan guessed
     # wrong (ubuntu:24.04 for a Python repo). One CHANGE_BASE_IMAGE fixes it.
     "BASE_IMAGE_MISMATCH": "retry",
+    # The spec names a distribution the index does not have (pip: `No matching
+    # distribution found for X (from versions: none)` with no network fault).
+    # One REMOVE_PKG, or an honest escalation for a git-sourced dependency.
+    "UNKNOWN_DISTRIBUTION": "retry",
     "ENTRYPOINT_UNKNOWN": "submitter",
     "MISSING_DATA_FILE": "submitter",
     "LICENSE_REQUIRED": "submitter",
@@ -187,8 +191,19 @@ _HEADER_DIR_APT = {
 # Also feeds ladder.py's L1 probe (reversed: dist -> import name), so an entry
 # here fixes both "what do I pip install for this missing import" and "what do
 # I actually try to import for this installed distribution".
+# Modules no distribution on the index provides: the importing package is broken
+# at that version. (module) -> (importer, the PIN_PKG argument that avoids it).
+# Corpus-sourced, one entry per observed case; do not broaden speculatively.
+UPSTREAM_BROKEN_IMPORT = {
+    # hold-out 5 disproved the `tellurium<2.2.11` pin: 2.2.10 imports tesbml too.
+    # No typed move is known; escalate with the evidence instead of chasing.
+    "tesbml": ("tellurium", None),
+}
+
 MODULE_PYPI = {
     "sklearn": "scikit-learn", "cv2": "opencv-python-headless", "yaml": "PyYAML",
+    "libsbml": "python-libsbml", "roadrunner": "libroadrunner", "libcellml": "libcellml",
+    "ruamel": "ruamel.yaml", "pylab": "matplotlib", "mpl_toolkits": "matplotlib", "google": "protobuf", "OpenGL": "PyOpenGL", "wx": "wxPython",
     "PIL": "Pillow", "Bio": "biopython", "skimage": "scikit-image",
     "mpl_toolkits": "matplotlib", "serial": "pyserial", "OpenGL": "PyOpenGL",
     "dateutil": "python-dateutil", "attr": "attrs", "pkg_resources": "setuptools",
@@ -241,6 +256,19 @@ def _rules():
     def module_not_found(m, ctx):
         full = m.group(1)
         mod = full.split(".")[0]
+        if mod in UPSTREAM_BROKEN_IMPORT:
+            # A module nothing on the index provides any more: the importing
+            # distribution's own defect at that version. The repair is to pin
+            # the importer, not to chase the module (hold-out 2-4: tellurium
+            # 2.2.13 imports `tesbml`; cpm and biosimulators_tellurium spent
+            # 7 attempts on ADD_PKG/REMOVE_PKG tesbml across three passes).
+            importer, pin = UPSTREAM_BROKEN_IMPORT[mod]
+            if pin:
+                return Classification("ABI_MISMATCH", action="PIN_PKG", arg=pin,
+                                      evidence=f"{m.group(0)} ({importer} ships no {mod}; pin the importer)")
+            return Classification("UNSUPPORTED_TOOLCHAIN", action="ESCALATE",
+                                  evidence=f"{m.group(0)} ({importer} imports {mod}, which no index provides for "
+                                           f"this interpreter; every pin tried across 3 passes still imported it)")
         # Rung-aware: the same text means different things at L1 and L2. At L1 no
         # code is mounted, so it can only be a missing dependency. At L2+ a module
         # the repo itself defines means the mount/PYTHONPATH is wrong -- installing
@@ -258,6 +286,19 @@ def _rules():
                                   arg=MODULE_PYPI.get(mod, mod), evidence=m.group(0))
         return Classification("MISSING_DEPENDENCY", action="ADD_PKG",
                               arg=MODULE_PYPI.get(mod, mod), evidence=m.group(0))
+
+    def legacy_sdist(m, ctx):
+        mod = m.group(1) or m.group(2)
+        cur = ctx.get("python_version") or ""
+        # Step one rung down the interpreter ladder; stop at the floor.
+        pick = None
+        if cur in _PY_LADDER:
+            i = _PY_LADDER.index(cur)
+            pick = _PY_LADDER[i - 1] if i > 0 else None
+        return Classification("DEP_RESOLUTION_CONFLICT",
+                              action="CHANGE_INTERPRETER_VERSION" if pick else "ESCALATE", arg=pick,
+                              evidence=f"legacy sdist: setup.py imports {mod} during metadata generation inside "
+                                       f"pip's isolated build; ADD_PKG cannot reach it. Older interpreter -> wheel.")
 
     def r_missing_pkg(m, _ctx):
         if UNSUPPORTED_TOOLS.match(m.group(1)):
@@ -278,6 +319,13 @@ def _rules():
             return Classification("MOUNT_CONTRACT_ERROR", action="FIX_MOUNT_CONTRACT", evidence=m.group(0))
         if path.startswith(code + "/"):
             top = path[len(code) + 1:].split("/")[0]
+            if top in (ctx.get("source_tops") or ()):
+                # The model writes into a directory that also holds its own
+                # code (viva-simbio: demo/demo_report.py writes demo/report.html).
+                # A volume there would hide the code; run from a writable copy.
+                return Classification("MOUNT_CONTRACT_ERROR", action="FIX_MOUNT_CONTRACT",
+                                      arg="writable_copy=true",
+                                      evidence=f"{m.group(0)}; {code}/{top} holds source files")
             return Classification("MOUNT_CONTRACT_ERROR", action="FIX_MOUNT_CONTRACT",
                                   arg=f"output_path={code}/{top}", evidence=m.group(0))
         if not path.startswith("/"):
@@ -341,15 +389,30 @@ def _rules():
         # this one and catches most of it; this guard is for a log whose network
         # line was cut off but whose "none" survived.
         text = ctx.get("text", "")
+        want = m.group(1).split("==")[0].split("[")[0]
         if "(from versions: none)" in text:
-            return Classification("INFRA_UNAVAILABLE", evidence=m.group(0))
+            # The index has NO project by this name. A network fault would have
+            # matched `infra_network` first (it needs a real network marker), so
+            # this is a fact about the spec: who put the name there decides the
+            # move. `pkg_origin` is built by the driver at init.
+            origin = (ctx.get("pkg_origin") or {}).get(re.sub(r"[-_.]+", "-", want).lower(), "")
+            if origin.startswith("vcs:"):
+                return Classification("UNKNOWN_DISTRIBUTION", action=None, arg=m.group(1),
+                                      evidence=f"{want} is declared as a git/path source ({origin[4:]}); "
+                                               f"installing from VCS is not supported in this revision")
+            if origin == "undeclared":
+                # Our own import-name guess was wrong; take it back.
+                return Classification("UNKNOWN_DISTRIBUTION", action="REMOVE_PKG", arg=want,
+                                      evidence=f"{m.group(0)}; {want} came from the undeclared-import scan")
+            return Classification("UNKNOWN_DISTRIBUTION", action=None, arg=m.group(1),
+                                  evidence=f"{m.group(0)}; not on the package index "
+                                           f"(origin: {origin or 'unknown'}) -- REMOVE_PKG with a reason, or escalate")
         # pip says WHY the pinned version was skipped one line earlier:
         #   Ignored the following versions that require a different python
         #   version: 1.6.0 Requires-Python >=3.9, <3.12
         # The author's pin is right and the interpreter is wrong. Unpinning
         # instead (rev-4 pass 1, tumor-tcell) installed a 2021 vivarium-core
         # that lacked a symbol the model imports, and L3 died on it.
-        want = m.group(1).split("==")[0].split("[")[0]
         pinned = m.group(1).split("==")[1] if "==" in m.group(1) else None
         for hint in re.finditer(r"(\S+) Requires-Python ([^;\n]+)", text):
             if pinned and hint.group(1) != pinned:
@@ -384,7 +447,10 @@ def _rules():
                     r"no such host|dial tcp.*(?:i/o timeout|connection refused)|"
                     r"TLS handshake timeout|Read timed out\.|Connection timed out|"
                     r"cannot open URL '|Some index files failed to download|"
-                    r"\(from versions: none\)|"
+                    # NOT `(from versions: none)`: pip prints that for any project
+                    # the index does not have -- a git-sourced sibling, an import-
+                    # name guess, a typo -- not only during an outage. The hold-out
+                    # pass closed 7 of 19 jobs as `error` on it. See no_matching_dist.
                     r"toomanyrequests|429 Too Many Requests|"
                     r"failed to resolve source metadata|error pulling image|"
                     r"ImagePullBackOff|ErrImagePull|"
@@ -425,6 +491,14 @@ def _rules():
         ("r_dependency",
          re.compile(r"dependency ['‘](\S+?)['’] is not available for package"),
          lambda m, _c: Classification("MISSING_DEPENDENCY", action="ADD_PKG", arg=m.group(1),
+                                      evidence=m.group(0))),
+        # The plural form lists every missing package at once (hold-out:
+        # epidemics, `dependencies ‘BH’, ‘Rcpp’, ‘RcppEigen’ are not available`);
+        # one ADD_PKG names them all.
+        ("r_dependencies",
+         re.compile(r"dependencies ((?:['‘]\S+?['’],?\s*)+) are not available for package"),
+         lambda m, _c: Classification("MISSING_DEPENDENCY", action="ADD_PKG",
+                                      arg=" ".join(re.findall(r"['‘](\S+?)['’]", m.group(1))),
                                       evidence=m.group(0))),
         # The base has no interpreter at all (ubuntu:24.04 picked for a repo
         # whose language the scan could not see). Not a package problem: a base
@@ -492,6 +566,23 @@ def _rules():
          re.compile(r"PackageNotFoundError: distribution '([\w.\-]+)' is not installed"),
          lambda m, _c: Classification("MISSING_DEPENDENCY", action="ADD_PKG", arg=m.group(1),
                                       evidence=m.group(0))),
+        # A legacy sdist whose setup.py imports something at metadata time, inside
+        # pip's isolated build env (hold-out 4/5, c302: owmeta_core -> termcolor~=1.1.0
+        # imports termcolor.VERSION). ADD_PKG of that module cannot reach the isolated
+        # build. Both observations were fixed by an older interpreter (3.10), where a
+        # wheel exists and no sdist build happens.
+        ("legacy_sdist", re.compile(r"metadata-generation-failed[\s\S]{0,3000}?"
+                                    r"(?:ModuleNotFoundError|ImportError): No module named '?([\w.]+)'?"
+                                    r"|(?:ModuleNotFoundError|ImportError): No module named '?([\w.]+)'?[\s\S]{0,3000}?metadata-generation-failed"),
+         legacy_sdist),
+        # A git direct reference that pip could not fetch (M1). The URL/ref is the
+        # spec's; a wrong sha or a private repo is the author's problem, a DNS
+        # failure is the substrate's (caught by infra_network first).
+        ("git_fetch_failed", re.compile(r"(?:fatal: (?:could not read|repository '([^']+)' not found|unable to access '([^']+)'|"
+                                        r"reference is not a tree: (\w+)|couldn't find remote ref (\S+)))"),
+         lambda m, ctx: Classification("UNKNOWN_DISTRIBUTION", action=None, arg=next(g for g in m.groups() if g) if any(m.groups()) else None,
+                                       evidence=f"{m.group(0)}; the git source in the spec is unreachable or the ref does not exist "
+                                                f"-- fix the ref with PIN_PKG `name @ git+url@sha`, or escalate")),
         ("py_module", re.compile(r"(?:ModuleNotFoundError|ImportError): No module named '?([\w.]+)'?"),
          module_not_found),
         ("r_module", re.compile(r"there is no package called ['‘](\S+?)['’]"), r_missing_pkg),
@@ -500,6 +591,13 @@ def _rules():
         # writable output volume -- `workdir=/outputs` -- which is only safe
         # because ladder.resolve_command anchors the script to code_path.
         ("mount_denied", re.compile(r"(?:Permission denied|Read-only file system)[^\n]{0,40}?'([^'\n]+)'"),
+         mount_denied),
+        # Toolchain phrasing of the same fact: the assembler/linker/compiler writing
+        # an object file next to the source (hold-out 5, epidemics: testthat's
+        # `compile_dll` in /model -> "Fatal error: can't create odin.o: Read-only
+        # file system"). The path is relative to the source tree -> writable copy.
+        ("toolchain_readonly", re.compile(r"(?:can't|cannot) (?:create|open|write)[^\n]{0,20}?([\w./\-]+\.(?:o|so|dll|a|mod|pyc|rds)): "
+                                          r"(?:Read-only file system|Permission denied)"),
          mount_denied),
         # `FileNotFoundError: './investigations/x.yaml'` at L3 after the workdir
         # was moved off code_path: the model reads cwd-relative too, so neither
@@ -530,7 +628,8 @@ RULES = _rules()
 
 def classify(stderr: str, rung: str = "L0", local_modules=(), exit_code: int | None = None,
              mount: dict | None = None, install_mode: str = "mounted",
-             requires_python: str | None = None, l3_timeout_s: int | None = None) -> Classification:
+             requires_python: str | None = None, l3_timeout_s: int | None = None,
+             pkg_origin: dict | None = None, source_tops=(), python_version: str | None = None) -> Classification:
     """Match the rule table against `stderr`.
 
     `rung` and `local_modules` disambiguate the same text across the ladder --
@@ -547,7 +646,9 @@ def classify(stderr: str, rung: str = "L0", local_modules=(), exit_code: int | N
             c = handler(m, {"rung": rung, "local_modules": set(local_modules), "text": text,
                             "code_path": mount.get("code_path", "/model"),
                             "install_mode": install_mode, "requires_python": requires_python,
-                            "l3_timeout_s": l3_timeout_s,
+                            "l3_timeout_s": l3_timeout_s, "pkg_origin": pkg_origin or {},
+                            "python_version": python_version,
+                            "source_tops": set(source_tops or ()),
                             "workdir_moved": bool(mount) and mount.get("workdir") != mount.get("code_path")})
             c.rule = name
             # A class that normally dead-letters may still carry one typed

@@ -229,6 +229,8 @@ class K8sVerifier:
                 return RunResult(False, 124 if timed_out else 1, "",
                                  f"{note}\n{logs[-4000:]}".strip(), duration,
                                  timed_out=timed_out)
+            if exit_code != 0 and not logs.strip():
+                logs = f"{note}: no output was captured before the container ended"
             return RunResult(exit_code == 0, exit_code, "", logs[-20000:], duration)
         finally:
             self.client.delete_pod(pod_name)
@@ -268,5 +270,12 @@ class K8sVerifier:
 def quote_cmd(cmd) -> list[str]:
     """Accept a command as a string or a list; always hand the pod a list."""
     if isinstance(cmd, str):
-        return shlex.split(cmd)
+        try:
+            return shlex.split(cmd)
+        except ValueError:
+            # Unbalanced quote (hold-out 4: a CI example `julia -e '` cut mid-
+            # string crashed `init` with a ValueError and the job closed `error`
+            # with zero attempts). A malformed command is a bad command, not a
+            # crash: hand it over whitespace-split and let L2/L3 report it.
+            return cmd.split()
     return [str(c) for c in cmd]

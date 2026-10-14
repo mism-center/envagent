@@ -87,7 +87,8 @@ a shell inside a running container, the answer is a rung, not a shell.
 Cluster setup is an operator's job, done once, from `deploy/envbuild.yaml` plus
 two Secrets (`envbuild-registry-auth`, `envbuild-llm`). If preflight reports a
 missing RBAC rule, an unreachable API server or a missing claim, say so and write
-an `error` verdict — do not try to work around it.
+an `error` verdict — do not try to work around it. `error` is for the substrate
+only; see the status table under Step 5.
 
 ### Step 1 — `init`
 
@@ -104,6 +105,22 @@ Without it the loop can still reach L1, but L2/L3 need an entry point.
 
 Read the printed `evidence_summary`, `base_choice`, `annotation`, and
 `draft_spec`. Note `job_id` — every later command needs it.
+
+**If `spec_source` is `memory`**, this model verified before and `draft_spec`
+*is that verified spec* (`memory.job_id` says which job; `memory.same_revision`
+whether the code changed since). Do not re-synthesize it: go straight to Step 3
+and run `envbuild attempt` on it as-is. It is still a draft — every rung runs —
+but it turns a four-attempt search into one attempt. Only if that attempt fails
+do you start repairing, from the failure it shows; `draft_from_evidence` is the
+spec `init` would have drafted without memory, for `envbuild spec --set-spec`
+if the remembered one is clearly stale (e.g. the repo now declares a different
+interpreter). `--no-memory` on `init` skips recall; `envbuild forget --model-id`
+drops a remembered spec that has gone wrong.
+
+If `annotation_findings` lists `vcs_dependency_installed`, git-sourced
+dependencies are rendered as `name @ git+url@sha` and the image gets `git`;
+treat them like any other spec entry. `vcs_dependency` (path/workspace/url
+sources) still cannot be installed: expect `UNKNOWN_DISTRIBUTION` and escalate.
 
 ### Step 2 — Synthesize the EnvSpec
 
@@ -162,6 +179,25 @@ envbuild verdict --job-id "$JOB" --status error    --reason "cluster unreachable
 on the work claim.
 Budget exhaustion writes its own verdict and tears down for you. If anything
 crashes mid-run, call `verdict --status error` before you stop.
+
+**Which status.** The status is the dataset's label, so it has to mean one thing:
+
+| status | when |
+|---|---|
+| `verified` | L3 passed (the driver wrote `best.rung == L3`) |
+| `failed` | the model's example did not pass and the attempts are spent — a build that will not build, an example that outran `l3_timeout_max_s` (`TIMEOUT` at L3 **is** `failed`, not `error`), a runtime error in the model |
+| `escalated` | no typed repair applies: an unsupported toolchain, a git-sourced dependency this revision cannot install, a repo defect the loop must not paper over |
+| `error` | the **substrate** failed — only after an `INFRA_UNAVAILABLE` attempt or a driver/cluster fault. The driver refuses `error` after a non-infra attempt. |
+
+**`UNKNOWN_DISTRIBUTION`** (pip: `No matching distribution found for X (from
+versions: none)` with no network fault) means the index has no project named X.
+`init` reports where each name came from (`annotation_findings`:
+`vcs_dependency`, `undeclared_imports`). An import-name guess → `REMOVE_PKG X`
+(the rule supplies it). A git/path-sourced sibling → `escalated` with the
+source URL in the reason; do not try to `pip install git+…` through
+`ADD_PRE_INSTALL_CMD`. A declared dependency that truly does not exist → check
+the spelling against the repo's own files once, then `REMOVE_PKG` with a reason
+or `escalated`.
 
 ### Step 6 — Report
 

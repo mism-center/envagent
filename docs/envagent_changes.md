@@ -354,3 +354,237 @@ See `pass_aks-rev4-7_report.md`. Suite: **144 checks**.
   `.github/workflows/docker-develop.yml`), no secret-shaped strings,
   `docs/` added to `.dockerignore`. Rev 4.7 items (`writable_copy` harvest, `typical_runtime` → L3 deadline) are
   unit-tested but **not yet exercised in a live pass**.
+
+
+---
+
+# Hold-out pass `aks-holdout-1` — 2026-09-29 (no code changes; findings only)
+
+20 unseen repos, one pass, no fixes between models. **1/19 verified, 0 false-verified, 44.8 % LLM fallback.**
+See `docs/pass_aks-holdout-1_report.md` for the four-way sort. Open items, by weight: H1 `infra_network` fires
+on pip's `(from versions: none)` without a network marker (7 jobs closed `error` unrepaired); H2 undeclared-import
+scan emits non-distributions (`libsbml`, vendored modules); M1 git/path-sourced deps from `[tool.uv.sources]`;
+H5/H6 renderer accepts a pkg_manager the base lacks and Poetry caret specs; H3 L3-max timeout should be
+`failed` not `error`; H4 grounding rejects CI globs and `Rscript -e`; M2–M5 compiled/second-runtime/C++/conda
+families. Also: `bench/ground_truth.yaml` gained 20 `holdout: true` entries; `bench/holdout_manifest.yaml` pins shas.
+
+---
+
+# rev 4.8 — the hold-out's harness bugs (H1–H6), before `aks-holdout-2`
+
+Fixes derived from `pass_aks-holdout-1_report.md`; every regression check uses that pass's own error text.
+Suite: **155 checks**. No rule was added for a single repo; each change parses a tool's message
+or a build file's declared structure.
+
+- **H1** `src/classify.py` — `infra_network` no longer matches pip's `(from versions: none)`; a real network
+  marker is required for `INFRA_UNAVAILABLE`. `no_matching_dist` returns the new class **`UNKNOWN_DISTRIBUTION`**
+  (routes `retry`) and uses `pkg_origin` to pick the move: undeclared-import guess → `REMOVE_PKG`;
+  git/path source → no action, escalate with the URL; declared → agent decides.
+- **M1 (lite)** `src/evidence.py` — `_parse_pyproject` reports `vcs_sources` (`[tool.uv.sources]`, Poetry git/path
+  tables) and the project `name`; `_parse_lockfile` reports per-package `sources`. `src/driver.py` `draft_spec`
+  never lock-pins a VCS-sourced name, records `pkg_origin` per spec entry (`lock` / `declared` / `annotation` /
+  `undeclared` / `vcs:<src>`) into `state.pkg_origin`, and `init` emits a `vcs_dependency` finding.
+- **H2** `src/evidence.py` `_undeclared_imports` — local = every directory name and module stem in the tree;
+  imports inside `try:` bodies or `if __name__ == "__main__":` are skipped; a module sharing a distinctive token
+  or substring with a declared/VCS distribution is taken as provided (`neuroml`←pyNeuroML,
+  `pbg_parsimony`←viva-parsimony). `MODULE_PYPI` += `libsbml→python-libsbml`, `roadrunner→libroadrunner`,
+  `ruamel→ruamel.yaml`, `pylab`/`mpl_toolkits→matplotlib`, `google→protobuf`, `OpenGL→PyOpenGL`.
+- **H3** `src/driver.py` `cmd_verdict` — `--status error` is refused after a non-infra attempt (the example that
+  outran `l3_timeout_max_s` is `failed`). `SKILL.md` gained a status table and the `UNKNOWN_DISTRIBUTION` playbook.
+- **H4** `src/examples.py` `grounded` — a glob entry (`pytest test_*.py`) is grounded when it matches a file;
+  `Rscript -e '…'` is grounded when the repo is an R package (`DESCRIPTION`).
+- **H5** `src/patch.py` — new action **`REMOVE_PKG`**; `SWITCH_INSTALLER` refuses an installer the base image
+  does not provide and names the `CHANGE_BASE_IMAGE` to make first (`_INSTALLER_BASE`).
+- **H6** `src/evidence.py` `_pep440` — Poetry `^`/`~` specs become PEP 440 ranges (`docker^7.1.0` → `>=7.1.0,<8`).
+- `src/baseselect.py` — R by file count only when R dominates (covasim: 193 .py + 1 .R had drafted a rocker base).
+- Specs: `failure_taxonomy.md` (`UNKNOWN_DISTRIBUTION`; the `(from versions: none)` note), `remediation_actions.md`
+  (`REMOVE_PKG`, installer guard), `success_criteria.md` (status semantics). Test
+  `_c_none_versions` rewritten to the property that survives (never `UNPIN_PKG`; never an outage by itself).
+- Dry run on the eight affected hold-out repos (fetched from the claim): zero PyPI guesses left for the five viva
+  repos that had them; covasim drafts `python:3.11-slim`/pip with 82 specs; c302 keeps `airspeed`, `lxml`,
+  `matplotlib`, `owmeta` (real, on PyPI). Not yet live-tested.
+
+---
+
+# Hold-out pass `aks-holdout-2` — 2026-10-01 (rev 4.8 tree as `rev4.9`; no code changes; findings only)
+
+2/19 verified (viva-tumor-tcell, **c302**), 0 false-verified, 0 `error` verdicts, 0 infra retries (pass 1: 1/19, 9 `error`,
+15 spurious retries). H1–H6 behaved as designed; the seven misfires became real classifications. Second layer, sorted in
+`pass_aks-holdout-2_report.md`: harness bugs H7 (mount repair over a code dir), H8 (Kaniko deadline kill → TIMEOUT), H11 (L1
+top_level over-probing), **H12 (installed-mode source tree shadows compiled extensions — the compiled family's blocker)**,
+H13 (frozen requirements under tests/ merged as declaration), H14 (L2 probe chosen by base not entry language), H15 (R plural
+"dependencies … are not available"; R `==` pins); mechanisms M1 VCS install, M3 Node, M5 conda names, M6 R from-source build
+time, M7 run-time egress.
+
+---
+
+# rev 4.9 — hold-out 2's second layer (H7, H8, H11–H15), before `aks-holdout-3`
+
+From `pass_aks-holdout-2_report.md`; regression checks use that pass's error text. Suite: **164 checks**, pyflakes clean.
+
+- **H12** `src/envspec.py` — installed mode sets `ENV PYTHONSAFEPATH=1` (pip/conda/mamba): the installed package is
+  what runs, the copy at `code_path` is data. A sibling-module import from a script now surfaces as
+  `IMPORT_PATH_ERROR` → `FIX_MOUNT_CONTRACT extra_path=…` (typed) instead of silently importing uncompiled source.
+- **H7** `src/evidence.py` `source_tops`; `src/classify.py` `mount_denied` proposes `writable_copy=true` when the
+  write target's top-level dir holds source; `state.source_tops` → `classify(source_tops=)`.
+- **H8** `src/driver.py` — `build_deadline` rule: a failed build with `duration >= build_timeout_s - 5` and no
+  classification is `TIMEOUT` at L0.
+- **H11** `src/ladder.py` `_L1_PROBE` — a distribution passes if its canonical module (name-derived or alias) imports;
+  all `top_level.txt` names are tried only without a canonical candidate; one line reported per failing dist.
+- **H13** `src/evidence.py` — declaration precedence: pyproject/setup.py; root `requirements*.txt` only when they
+  declare nothing; files under `tests/`/`ci/`/`docs/` or named `*frozen*`/`*freeze*`/`*lock*` are listed in
+  `python.ignored_requirements` and never merged.
+- **H14** `src/ladder.py` `run_l2` — probe chosen by the entry's suffix (`.R`/`.r` → R, else python; bare → by
+  `pkg_manager`).
+- **H15** `src/classify.py` `r_dependencies` (plural) → one `ADD_PKG` naming all; `src/patch.py` `ADD_PKG` accepts a
+  space-separated family of bare names; `PIN_PKG` refused for R specs; `src/evidence.py` DESCRIPTION `LinkingTo`
+  counted as declared.
+- Specs: `failure_taxonomy.md` (build-deadline `TIMEOUT`), `remediation_actions.md` (`ADD_PKG` family, R `PIN_PKG`),
+  `success_criteria.md` (installed mode and the source tree; mount repairs never cover source).
+- Dry run on the cached hold-out sources: covasim 27 specs (was 82; `tests/requirements_frozen.txt` ignored),
+  `PYTHONSAFEPATH` rendered for the seven installed-mode repos, `demo` in viva-simbio's `source_tops`.
+  Not yet live-tested. Not addressed (design items): M1 VCS install, M3 Node, M5 conda names, M6 R binaries, M7 egress.
+
+---
+
+# Hold-out pass `aks-holdout-3` — 2026-10-02 (rev 4.9 tree as `rev4.10`; no code changes; findings only)
+
+**6/19 verified** (viva-tumor-tcell, viva-simbio, viva-amici, covasim, starsim, viva-yalla†), 0 false-verified, 1 `error`
+(real API outage), 1 infra retry (real ErrImagePull), LLM fallback 35.6 % (was 45.7 %). H7/H8/H11/H13/H15 each moved the
+model they targeted; epidemics builds and passes L1 for the first time. Two harness bugs remain, sorted in
+`pass_aks-holdout-3_report.md`: **H16** a command with no script token (`pytest`, `Rscript -e`, `make test`, `julia -e`)
+is reported as "annotation declares no entry point" at L2 — c302 regressed on it, epidemics/covid-sim/catalyst-jl stopped
+on it; **H12b** installed mode kept `extra_path=['/model']` → `PYTHONPATH=/model` defeats `PYTHONSAFEPATH` (viva-cpm,
+viva-biofilm). † viva-yalla and starsim verified on an agent-grounded alternate example (README demo calls macOS `open`;
+no README command) — flagged for a human policy call; proposed ground-truth field `alternate_example_ok`.
+
+---
+
+# rev 4.10 — H16 and H12b (from `aks-holdout-3`), before `aks-holdout-4`
+
+Suite: **168 checks**, pyflakes clean. Not yet live-tested.
+
+- **H16** `src/ladder.py` `climb` — an entry with no script token but a non-empty command (`pytest`, `Rscript -e`,
+  `make test`, `julia -e`) no longer fails L2 as "annotation declares no entry point"; L2 is recorded
+  `notes.l2_claim = not probeable` and L3 runs the command. Only an empty command is `ENTRYPOINT_MISSING`.
+- **H12b** `src/envspec.py` renderer filters `extra_path` entries at/under `code_path` in installed mode;
+  `src/patch.py` `SWITCH_INSTALL_MODE installed` drops them (noted in the result); `src/driver.py` `draft_spec` does not
+  seed `extra_path` from local modules when the draft is `installed`. Test `_d_draft_spec_mount` updated to the new
+  contract (the `installed_mode` fixture drafts `installed`).
+- `specs/success_criteria.md` — both contracts written down.
+
+---
+
+# Hold-out pass `aks-holdout-4` — 2026-10-05 (rev 4.10 tree as `rev4.11`) and rev 4.11
+
+**4/19 verified** (tumor-tcell, simbio, amici, covasim — identical chains to pass 3), 0 false-verified, LLM fallback 38.3 %.
+H16 and H12b both did their job (every bare command reached L3; no shadowing at L1/L2); the number fell from 6 because
+pass 3's two alternate-example verifications did not repeat — viva-yalla's pass-3 output came from the README demo's run,
+not the command credited; starsim's depends on install mode. **Stable hold-out rate: 4/19 across two passes.**
+Full sort in `pass_aks-holdout-4_report.md`.
+
+**rev 4.11** (173 checks, pyflakes clean, not live-tested):
+- **H17** `src/k8s.py` `wait_terminated` returns `ENVBUILD_EXIT: container exited N (reason)`; `src/verifier.py` substitutes it
+  when the log is empty (c302's L3 row had exit None and no text).
+- **H18** `src/envspec.py` R install step checks `installed.packages()` and fails the build naming missing packages
+  (`ENVBUILD_R_NOT_INSTALLED`) — `install.packages()` exits 0 on failure (epidemics).
+- **H12c** `src/ladder.py` `run_l3`: installed-mode `pytest` gets `PYTEST_ADDOPTS=--import-mode=importlib -p no:cacheprovider
+  --rootdir=<code_path> --basetemp=<output_path>/.pytest_tmp` (viva-biofilm, starsim).
+- **H19** `src/verifier.py` `quote_cmd` falls back to whitespace split on an unbalanced quote; `src/examples.py` `is_command`
+  rejects such lines (catalyst-jl init crash).
+- **R2** `src/classify.py` `UPSTREAM_BROKEN_IMPORT` — `tesbml` → `PIN_PKG tellurium<2.2.11` (cpm, biosimulators_tellurium).
+- Test `_render_kaniko_portable` heredoc assertion narrowed (the R marker string contains "ENVBUILD").
+
+---
+
+# `aks-holdout-5` aborted — 2026-10-06 — agent runtime drift, not a model result
+
+All 20 Jobs on `rev4.12` (= rev 4.11 tree, verified) failed within ~2 min, before `init`: `Error: Unknown provider
+"azure-openai-responses"`. `harness/Dockerfile` installed `@earendil-works/pi-coding-agent` **unpinned**; the Oct 6 build
+pulled **pi 1.0.4** (every earlier image: 0.99.0), and pi 1.0 renamed the provider id to `azure` (`gpt-5.6-luna` is listed
+under it). No attempt or verdict rows were written; the 20 Jobs were deleted. The per-file hash probe covers
+`/opt/skills/envbuild` only and could not have caught this.
+
+Fixes (tree, rev 4.11 + harness):
+- `harness/Dockerfile` — `ARG PI_VERSION=1.0.4`; install pinned. Bump deliberately.
+- `harness/entrypoint.sh` — provider id resolved by asking the installed pi (`--list-models` lists `azure` → use it, else
+  `azure-openai-responses`); exports `AI_RUNTIME_VERSION`.
+- `src/driver.py` `run_provenance` — new field `run.agent_runtime` on every row, so a pass report can state the agent
+  version the way it states the image digest.
+
+Caveat for the next pass: pi 1.0.4 is a **different agent runtime** from the one every previous pass used. `aks-holdout-5`
+on it is measured against passes 1–4 with that change in the open; if results shift in ways the four code fixes do not
+explain, the runtime is the first suspect.
+
+---
+
+# Hold-out pass `aks-holdout-5` — 2026-10-06 (rev 4.11 tree + harness as `rev4.13`, pi 1.0.4) and rev 4.12 tree
+
+**4/19 verified** (tumor-tcell, simbio, amici, covasim — third pass with the same four), 0 false-verified, 0 `error`,
+LLM fallback 40.3 %; viva-yalla verified on `pytest` only → reported separately. H18 took epidemics to L3 for the first time;
+H12c took viva-biofilm to its study (plotly/kaleido needs Chrome: new M8); H19 held. **R2 disproved**: `tellurium<2.2.11`
+installed and still imports `tesbml`. Full sort in `pass_aks-holdout-5_report.md`.
+
+**rev 4.12 tree** (175 checks, pyflakes clean, not live-tested):
+- **H20** `src/driver.py` `entry_tier()` + verdict `entrypoint_tier`; `scripts/score.py` reports `verified_tests` outside
+  build success (attribution `policy:alternate_example`), honours `alternate_example_ok` in ground truth. Passes 3–5 re-scored.
+- **H12d** `src/ladder.py` `run_l3`: under `writable_copy`, `extra_path` entries under `code_path` move into the copy.
+- **R2** `src/classify.py` `UPSTREAM_BROKEN_IMPORT["tesbml"]` → `UNSUPPORTED_TOOLCHAIN`/`ESCALATE` with the evidence; the pin is gone.
+- `specs/success_criteria.md` — "A test suite is not the example".
+- Open: H22 (`venv`/`source` lines accepted as entries), R3 (legacy-sdist metadata failure), H23 (Julia runs the R L1 probe).
+
+---
+
+# rev 4.13 — the sprint before `aks-holdout-6` (2026-10-07; not live-tested)
+
+Decisions: scope = M1 + M6 + cross-job memory, single-repo reruns only until done; alternate-example policy = a shipped
+demo counts, a test suite never does. Pre-registered expectation for pass 6: **8–10/19**. Suite **184 checks**, pyflakes clean.
+
+- **M1** `src/driver.py` `git_direct_ref()`: git sources → `name @ git+url@<sha>` (sha from uv/poetry lock, incl. uv's
+  `?branch=…#sha` form; lock overrides pyproject's branch); `vcs_installed`/`vcs_unpinned`, finding
+  `vcs_dependency_installed`; `src/envspec.py` adds `git` to apt when a direct ref is present; `src/classify.py`
+  `git_fetch_failed` → `UNKNOWN_DISTRIBUTION` naming the ref; toolchain-name filter exempts PEP 508 direct refs;
+  `src/evidence.py` carries `rev/tag/branch` on pyproject git sources. Dry-run: membrane-actin gets 3 sha-pinned refs,
+  mgen 1 branch ref (unpinned).
+- **M6** `src/envspec.py` `r_repos()`: rocker/r-ver bases install from P3M binaries (jammy/noble/focal by R minor) with
+  source CRAN fallback and the `HTTPUserAgent` P3M needs; `src/driver.py` `build_timeout_s(cfg, spec)` per manager
+  (`build_timeout_<mgr>_s`, else renv/pkg ×3, conda/mamba ×2); `config.ini` `build_timeout_renv_s = 1800`;
+  the deadline rules follow it.
+- **Cross-job memory** `src/memory.py` (`remember` on `verified` only, `recall` at `init`, `forget`); `init` drafts from
+  the remembered spec (`spec_source: memory`, `memory.{job_id,run_id,same_revision,charged_attempts_then}`,
+  `draft_from_evidence` kept), `--no-memory`, `envbuild forget`; rows/verdicts carry `spec_source`, `memory_job_id`;
+  scorer reports `success_from_memory`. SKILL.md Step 1 tells the agent to run a memory draft as-is first.
+- **H22** `src/examples.py` `is_command` rejects environment-setup lines (`venv`, `source …activate`, `pip install`,
+  `conda create`, `cd`, `export`, `git clone`).
+- **R3** `src/classify.py` `legacy_sdist`: pip `metadata-generation-failed` + inner ModuleNotFoundError →
+  `DEP_RESOLUTION_CONFLICT` / `CHANGE_INTERPRETER_VERSION` one rung down (ESCALATE at the floor); `python_version`
+  added to the classifier context from the base tag.
+- **epidemics** `src/classify.py` `toolchain_readonly`: "can't create X.o: Read-only file system" → `writable_copy`.
+- **H20 scorer** aligned with the decision: `verified_tests` never counts; `verified_alternate` counts and is flagged
+  until `alternate_example_ok` confirms it (set true for viva-yalla, starsim). Pass 3 re-scores to 5/19.
+- `bench/ground_truth.yaml` — `alternate_example_ok`, `policy_note`, `design_item` fields. Specs updated.
+- Open: H23 (Julia runs the R L1 probe; cosmetic). Needs a build as **`rev4.14`** and a pi smoke before launch.
+
+---
+
+# rev 4.14 — rerun-6's layer + build-pod resources (2026-10-08; 191 checks, pyflakes clean, not live-tested)
+
+Image `rev4.14` (= rev 4.13 tree) ran six single-repo reruns (`rerun_aks-rerun-6_report.md`): M1, M6, R3 and
+`toolchain_readonly` each moved their target one layer; viva-mgen verified (tests tier). The new layer:
+
+- **H26** `src/driver.py` `runner_deps()` + `is_test_runner()`: the entry's runner (`pytest`; `testthat` + DESCRIPTION
+  Suggests) is added to `pkg_specs` at `init` (finding `runner_dependency_added`). c302's installed image had
+  `ENTRYPOINT ["pytest"]` and no pytest → StartError 128. `src/evidence.py` parses `Suggests` (`r.suggests`).
+- **H24** `src/ladder.py` `_L1_PROBE`: distributions with no top-level module are skipped (starsim: intel-cmplr-lib-rt, mkl).
+- **H25** `envbuild patch --classified-by agent` accepted (alias of `llm`).
+- **H27** `src/evidence.py` `_HEAVY_GROUP`: optional groups named `sim|gpu|all|mpi|docs|…` are left out of the draft and
+  reported as `optional_groups_skipped` (membrane-actin spent 3 attempts compiling pymem3dg/readdy for a demo that skips them).
+- **Policy** `choose_entry` prefers a script example over a test runner; `entry_tier` uses `is_test_runner`.
+  `bench/ground_truth.yaml` viva-mgen example → `python workspace/studies/fig2-growth/sims/run.py`.
+- **Build pod resources** `src/builder.py` `BUILD_RESOURCES` + `resources_from_config()`; `config.ini [builder]`
+  `request_cpu|memory|ephemeral`, `limit_cpu|memory|ephemeral` (defaults 1 / 2Gi / 8Gi, 4 / 8Gi / 32Gi); Kaniko
+  `--kaniko-dir` on the work claim. A namespace LimitRange defaulting to 250m/256Mi/256Mi-ephemeral kills Kaniko at the
+  first layer. **Known limit:** Kaniko extracts the image into its own root filesystem, which counts as ephemeral storage
+  and cannot be redirected to a volume; a namespace with a 9 Gi ephemeral quota (~700 Mi free) cannot run it at any
+  setting. The structural fix is a volume-backed builder (BuildKit rootless, state on the work PVC) behind the existing
+  `Builder` protocol — scoped as the next design item after `aks-holdout-6`.

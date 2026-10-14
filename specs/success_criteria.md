@@ -129,3 +129,63 @@ Per trial (model × repeat — repeatability is part of the rate), filtered on
 `bench/ground_truth.yaml` is human-curated and independent of the annotator;
 its `human_verified` date is what allows an `upstream` attribution. Until it
 is set for a model, that model's example failures are `unattributed`.
+
+## Verdict status is the dataset's label
+
+`error` is reserved for substrate failures (the last attempt routed to `infra`,
+or the driver itself faulted). The driver refuses `--status error` otherwise.
+An example that outran `l3_timeout_max_s` is `failed` (class `TIMEOUT`, the max
+recorded); a model the loop cannot help is `escalated`. The first hold-out pass
+recorded a correct environment with a slow example as `error`, which hid the
+only useful fact about it.
+
+## Installed mode and the source tree
+
+In `installed` mode the renderer copies the repo to `code_path` **and** installs
+it, and the image sets `PYTHONSAFEPATH=1`: the installed package is what runs;
+the copy at `code_path` is data (entry scripts, examples, configs). Without
+this, `workdir == code_path` puts the uncompiled source first on `sys.path`
+and any compiled extension imports its own source copy (hold-out 2: viva-cpm,
+viva-biofilm). A script that imports a sibling module from its own directory
+now fails at L2 with `IMPORT_PATH_ERROR` → `FIX_MOUNT_CONTRACT extra_path=…`,
+which is the typed repair for exactly that. The same rule means `extra_path`
+never contains `code_path` or a directory under it in installed mode: the
+draft does not seed it, `SWITCH_INSTALL_MODE installed` drops it, and the
+renderer filters it (hold-out 3: `PYTHONPATH=/model` had undone
+`PYTHONSAFEPATH` on viva-cpm and viva-biofilm).
+
+## Memory is a draft, not a verdict
+
+A model that verified before starts from that spec (`spec_source: memory`).
+Every rung still runs; the record says the spec came from memory, and the
+scorer reports successes-from-memory separately from successes-by-search.
+Memory is written only by a `verified` verdict and only read at `init`.
+
+## Alternate examples (decision 2026-10-07)
+
+When the README's example is broken or absent, a *shipped demo script* that
+runs clean counts as verified (`alternate_example_ok` in the ground truth
+confirms it per model; the scorer flags unconfirmed ones). A *test suite*
+never counts as the example.
+
+## A test suite is not the example
+
+A verification whose entry is a test suite the agent fell back to (`pytest`,
+`testthat::test_local()`, `make test`) proves the environment, not the
+repo's example. The verdict records `entrypoint_tier`; the scorer reports
+these as `verified_tests`, outside build success, unless the ground truth's
+`example` is the tests or `alternate_example_ok: true` is set by a human.
+
+## A command with no script is still an entry point
+
+`pytest`, `Rscript -e '…'`, `make test`, `julia -e '…'` name no file for the L2
+import probe. L2 is recorded as `not probeable` (`notes.l2_claim`) and L3 runs
+the command — the run is the test. Only an empty command is
+`ENTRYPOINT_MISSING`. Hold-out 3 lost four correct environments (c302,
+epidemics, covid-sim, catalyst-jl) to the old message.
+
+## Mount repairs never cover source
+
+`mount_denied` proposes `output_path=<code>/<dir>` only when `<dir>` holds no
+source (`evidence.source_tops`); otherwise `writable_copy=true`. A volume over
+`demo/` hid `demo/demo_report.py` in hold-out 2.
