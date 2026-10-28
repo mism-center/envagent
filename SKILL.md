@@ -1,6 +1,6 @@
 ---
 name: envbuild
-description: Turn a registered computational model (a git repo plus an approved annotation YAML) into a verified execution environment — a digest-pinned dependency image pushed to a registry, a verification level (L0–L3), and a complete record of every attempt made to get there. Runs a search-with-verification loop: synthesize a structured EnvSpec, build it with BuildKit, climb the verification ladder, classify the failure, apply exactly one typed repair, repeat until verified or out of budget. Use whenever a user asks to build, containerize, dockerize, reproduce, or verify the execution environment for a model or repo — including "make this repo runnable", "build an image for this model", "does this model actually run", "why won't this install", or "reverify this after the code changed". Trusted-corpus repos only.
+description: Turn a registered computational model (a git repo plus an approved annotation YAML) into a verified execution environment — a digest-pinned dependency image pushed to a registry, a verification level (L0–L3), and a complete record of every attempt made to get there. Runs a search-with-verification loop: synthesize a structured EnvSpec, build it with Kaniko, climb the verification ladder, classify the failure, apply exactly one typed repair, repeat until verified or out of budget. Use whenever a user asks to build, containerize, dockerize, reproduce, or verify the execution environment for a model or repo — including "make this repo runnable", "build an image for this model", "does this model actually run", "why won't this install", or "reverify this after the code changed". Trusted-corpus repos only.
 ---
 
 # envbuild
@@ -71,27 +71,24 @@ replays L2–L3 against the existing image and skips the expensive part entirely
 
 ### Step 0 — Preconditions
 
-Confirm the repo is corpus-trusted. Then check the stack is up:
+Confirm the repo is corpus-trusted. Then run the substrate check — the CLI does
+it for you, and it is one access review rather than a build:
 
 ```bash
-docker compose -f "$SKILL_DIR/compose.yaml" ps
+envbuild init ...        # preflights before it does anything expensive
 ```
 
-`buildkitd` and `registry` must both be running, and `buildctl` must be on
-`PATH`. If you are driving from the **host** (a Claude Code session rather than
-the Pi container), both need one-time setup:
+**You have no cluster tools and do not need any.** There is no `kubectl` and no
+`docker` in this image. Builds and verification runs are pods the CLI creates
+over the Kubernetes API, as a ServiceAccount that can create pods and read their
+logs and nothing else. It has **no `pods/exec`** — if you catch yourself wanting
+a shell inside a running container, the answer is a rung, not a shell.
 
-```bash
-docker run --rm --entrypoint cat moby/buildkit:v0.24.0 /usr/bin/buildctl > ~/.local/bin/buildctl
-chmod +x ~/.local/bin/buildctl
-docker compose -f "$SKILL_DIR/compose.yaml" -f "$SKILL_DIR/compose.host.yaml" \
-  up -d buildkitd registry
-export ENVBUILD_BUILDKIT_HOST=tcp://127.0.0.1:1234
-```
-
-The base compose file leaves buildkitd unpublished on purpose; `compose.host.yaml`
-binds it to loopback only. If any of this is missing, say so — do not try to build
-without it.
+Cluster setup is an operator's job, done once, from `deploy/envbuild.yaml` plus
+two Secrets (`envbuild-registry-auth`, `envbuild-llm`). If preflight reports a
+missing RBAC rule, an unreachable API server or a missing claim, say so and write
+an `error` verdict — do not try to work around it. `error` is for the substrate
+only; see the status table under Step 5.
 
 ### Step 1 — `init`
 
@@ -108,6 +105,22 @@ Without it the loop can still reach L1, but L2/L3 need an entry point.
 
 Read the printed `evidence_summary`, `base_choice`, `annotation`, and
 `draft_spec`. Note `job_id` — every later command needs it.
+
+**If `spec_source` is `memory`**, this model verified before and `draft_spec`
+*is that verified spec* (`memory.job_id` says which job; `memory.same_revision`
+whether the code changed since). Do not re-synthesize it: go straight to Step 3
+and run `envbuild attempt` on it as-is. It is still a draft — every rung runs —
+but it turns a four-attempt search into one attempt. Only if that attempt fails
+do you start repairing, from the failure it shows; `draft_from_evidence` is the
+spec `init` would have drafted without memory, for `envbuild spec --set-spec`
+if the remembered one is clearly stale (e.g. the repo now declares a different
+interpreter). `--no-memory` on `init` skips recall; `envbuild forget --model-id`
+drops a remembered spec that has gone wrong.
+
+If `annotation_findings` lists `vcs_dependency_installed`, git-sourced
+dependencies are rendered as `name @ git+url@sha` and the image gets `git`;
+treat them like any other spec entry. `vcs_dependency` (path/workspace/url
+sources) still cannot be installed: expect `UNKNOWN_DISTRIBUTION` and escalate.
 
 ### Step 2 — Synthesize the EnvSpec
 
@@ -159,12 +172,32 @@ Every exit path writes a verdict. Do not end a job without one:
 envbuild verdict --job-id "$JOB" --status verified
 envbuild verdict --job-id "$JOB" --status failed   --reason "annotation declares no entry point"
 envbuild verdict --job-id "$JOB" --status escalated --reason "MATLAB toolchain"
-envbuild verdict --job-id "$JOB" --status error    --reason "buildkitd unreachable"
+envbuild verdict --job-id "$JOB" --status error    --reason "cluster unreachable"
 ```
 
-`verdict` also tears down: containers, named volumes, pulled images, build cache.
+`verdict` also tears down: any pods this job created, and its scratch directory
+on the work claim.
 Budget exhaustion writes its own verdict and tears down for you. If anything
 crashes mid-run, call `verdict --status error` before you stop.
+
+**Which status.** The status is the dataset's label, so it has to mean one thing:
+
+| status | when |
+|---|---|
+| `verified` | L3 passed (the driver wrote `best.rung == L3`) |
+| `failed` | the model's example did not pass and the attempts are spent — a build that will not build, an example that outran `l3_timeout_max_s` (`TIMEOUT` at L3 **is** `failed`, not `error`), a runtime error in the model |
+| `escalated` | no typed repair applies: an unsupported toolchain, a git-sourced dependency this revision cannot install, a repo defect the loop must not paper over |
+| `error` | the **substrate** failed — only after an `INFRA_UNAVAILABLE` attempt or a driver/cluster fault. The driver refuses `error` after a non-infra attempt. |
+
+**`UNKNOWN_DISTRIBUTION`** (pip: `No matching distribution found for X (from
+versions: none)` with no network fault) means the index has no project named X.
+`init` reports where each name came from (`annotation_findings`:
+`vcs_dependency`, `undeclared_imports`). An import-name guess → `REMOVE_PKG X`
+(the rule supplies it). A git/path-sourced sibling → `escalated` with the
+source URL in the reason; do not try to `pip install git+…` through
+`ADD_PRE_INSTALL_CMD`. A declared dependency that truly does not exist → check
+the spelling against the repo's own files once, then `REMOVE_PKG` with a reason
+or `escalated`.
 
 ### Step 6 — Report
 
@@ -191,6 +224,7 @@ Read on demand, not up front:
 | `specs/remediation_actions.md` | Step 4, to pick an action and its argument |
 | `specs/base_selection.md` | when a base choice or `install_mode` looks wrong |
 | `specs/record_schema.md` | when reading `outputs/*.jsonl`, or answering the infra team |
+| `specs/success_criteria.md` | when the entry point looks wrong, before `SET_ENTRYPOINT`; when writing the verdict reason for a corrected job |
 
 ## Rules that are not negotiable
 
@@ -200,6 +234,23 @@ Read on demand, not up front:
 - **Never pass an existing Dockerfile through.** It is evidence, not a template.
 - **Never use a bare tag as a base.** Digest or nothing.
 - **One typed action per attempt**, with a `--why`.
+- **Never patch a substrate failure.** `INFRA_UNAVAILABLE` (`routes_to:
+  "infra"`, `charged: false`) means DNS, a registry or an index was down. The
+  attempt was not charged; re-run `envbuild attempt` with the same spec. The
+  driver refuses `patch` until a real attempt has run.
+- **`ADD_PRE_INSTALL_CMD` prepares the environment; it never makes a probe
+  pass.** Writing into `site-packages`, editing `/etc/hosts`, or installing a
+  package through the shell is refused. If the L1 probe is wrong about an
+  import name, that is a bug to report in the summary, not something to shim
+  around inside the image.
+- **Success is the repo's example running, not the annotation's entry.**
+  `init` prints `examples`, `annotation_findings` and the `command` it chose
+  (with `entrypoint_source`). If L2/L3 shows the chosen example is wrong,
+  `SET_ENTRYPOINT` to a listed example — grounded or it is refused, two per
+  job — and say why. Never invent an entry point. See `specs/success_criteria.md`.
+- **The lockfile is part of the result.** After L1 the attempt result carries
+  `lockfile` (what the image actually contains, hashed). Quote its `sha256` in
+  the verdict reason for a `verified` job.
 - **Every job ends in a verdict.** A job that ends without one is the single
   failure mode that corrupts the dataset.
 - **`ADD_PKG` on an L2 import failure requires justification.** If the missing

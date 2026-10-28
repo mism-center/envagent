@@ -1,6 +1,6 @@
 # envbuild — Docker harness (Pi)
 
-Runs the `envbuild` skill as a one-shot, headless container using the
+Runs the `envbuild` skill as a one-shot, headless **pod** using the
 [Pi](https://pi.dev) coding agent instead of Claude Code, mirroring the
 `biomodel-annotator` harness in this org.
 
@@ -8,8 +8,7 @@ Runs the `envbuild` skill as a one-shot, headless container using the
 
 | Path | Role |
 |---|---|
-| `Dockerfile` | node:24 + Pi + skill + `uv` + `docker`/`buildx` + `buildctl`. **Build from repo root.** |
-| `buildkitd.toml` | Tells buildkitd the local registry is plain HTTP. Without it push and cache export fail on TLS. |
+| `Dockerfile` | node:24 + Pi + skill + `uv` + `git`. No docker, no kubectl. **Build from repo root.** |
 | `pi/settings.json` | Registers the skill. No MCP, no extensions. |
 | `pi/APPEND_SYSTEM.md` | Skill dir, uv rules, endpoint env vars, the verdict obligation, the trusted-corpus constraint. |
 | `entrypoint.sh` | Launches the run; resumes with `--continue` if the stream drops. |
@@ -31,36 +30,25 @@ docker build -t envbuild-pi -f harness/Dockerfile .
 
 ## Run
 
-The agent needs the buildkitd and registry services, so use compose rather than
-a bare `docker run`:
-
-Easiest is the launcher at the repo root, which brings the stack up for you:
-
-```bash
-export AZURE_OPENAI_BASE_URL="https://<resource>.cognitiveservices.azure.com/openai/v1/"
-export AZURE_OPENAI_API_KEY="..."             # from your secret store
-../run.sh ../MBMM mism:model/mbmm
-```
-
-Or by hand:
+The agent runs **in the cluster**, as a Job. It needs two PVCs (the model
+artifacts read-only, envbuild's own scratch read-write) and the `envbuild`
+ServiceAccount. `../run.sh` renders `deploy/agent-job.yaml` and applies it:
 
 ```bash
-export DOCKER_GID=$(getent group docker | cut -d: -f3)
-docker compose up -d buildkitd registry
-docker compose run --rm \
-  -e MODEL_ID="mism:model/1a2b3c" \
-  -e ANNOTATION=/workspace/repo/metadata-package \
-  -v /path/to/model:/workspace/repo \
-  agent
+../run.sh mbmm/1.0 mism:model/mbmm      # <model_id>/<version> on irods-pvc
+kubectl -n default logs -f job/envbuild-<job>
 ```
+
+One-time cluster setup is in `deploy/envbuild.yaml` plus two Secrets — see the
+header of `run.sh`.
 
 ## Credentials
 
-Read from the **host environment only** — never baked into the image, compose
-file, or a tracked script. `entrypoint.sh` infers the provider from whichever key
-is present and fails with exit 78 (`EX_CONFIG`) naming the missing variable if
-none is, rather than dying several minutes into a build with a stream error that
-looks like a model fault.
+Read from the `envbuild-llm` Secret, mounted into the Job as environment
+variables — never baked into the image or a tracked file. `entrypoint.sh` infers
+the provider from whichever key is present and fails with exit 78 (`EX_CONFIG`)
+naming the missing variable if none is, rather than dying several minutes into a
+build with a stream error that looks like a model fault.
 
 | Variables | Provider | Default model |
 |---|---|---|
@@ -68,30 +56,46 @@ looks like a model fault.
 | `ANTHROPIC_API_KEY` | Pi default resolution | `anthropic/claude-opus-4-5` |
 
 `AI_PROVIDER` and `AI_MODEL` override both. Other passthroughs: `MODEL_REPO`
-(default `/workspace/repo`), `ANNOTATION`, `MODEL_ID`, `PROMPT`, `MISM_GUID`,
+(`/models/<model_id>/<version>`), `ANNOTATION`, `MODEL_ID`, `PROMPT`, `MISM_GUID`,
 `MAX_ATTEMPTS`.
 
-stdout = full JSON event trace; `outputs/attempts.jsonl` and
-`outputs/verdicts.jsonl` land in the mounted `./outputs`.
+stdout = full JSON event trace; `attempts.jsonl` and `verdicts.jsonl` land under
+`ENVBUILD_OUTPUTS` on the work claim, which outlives the pod.
 
-## Why the two registry hostnames
+## Why the registry is not cluster-local
 
-buildkitd pushes to `registry:5000` (compose network). The **host** daemon pulls
-the same digest from `localhost:5000` (published port). Docker trusts localhost
-registries without an `--insecure-registry` daemon flag, so this needs no host
-reconfiguration. Same image, same digest, different route.
+The build pod pushes and the verification pod pulls, and they are different pods
+with no shared image store — so an image has to go somewhere both can reach
+(Docker Hub by default, `ENVBUILD_REGISTRY_PUSH`). Kaniko authenticates from the
+`envbuild-registry-auth` Secret; verification pods use the same Secret as an
+`imagePullSecret`; this process reads manifests from it over HTTPS to resolve
+base digests and image sizes.
+
+The image is always addressed **by digest** from the moment it is built, so what
+gets verified is provably what got built.
 
 ## Egress
 
-Outbound HTTPS to the model provider, plus whatever base images and package
-indexes a build needs (`docker.io`, `pypi.org`, `deb.debian.org`, …). Verification
-containers run with `--network none` — a model that only "runs" with live network
-access has not been verified.
+The agent pod talks outbound HTTPS to the model provider, the Kubernetes API and
+the registry. Build pods reach whatever base images and package indexes a build
+needs (`docker.io`, `pypi.org`, `deb.debian.org`, …).
+
+**Verification pods reach nothing.** They carry `envbuild.io/network: deny`, which
+the NetworkPolicy in `deploy/envbuild.yaml` selects — no egress, no ingress, no
+DNS. That is the in-cluster form of `--network none`, and it only holds if the
+cluster's CNI actually enforces NetworkPolicy. Prove that once, with an L3 that
+tries to reach the network and fails, before trusting a `verified` verdict.
 
 ## Security posture
 
-Phase 0 has **no sandbox** on verification. The agent container mounts the host
-docker socket, which is root-equivalent on the host. Run it against the trusted
-corpus only, on a machine you are willing to treat as expendable. Hardening
-(gVisor, ephemeral namespaces, in-cluster execution) is deliberately out of scope
-and is why `Builder` and `Verifier` are separate protocols.
+The agent authenticates as the `envbuild` ServiceAccount, which can create pods
+and read their logs **in one namespace** and nothing else. No `pods/exec`, no
+`secrets`, no docker socket. Verification pods get no ServiceAccount token, drop
+all capabilities, cannot escalate privilege, and mount the model source
+read-only.
+
+What is still missing is a real sandbox *inside* the verification pod: model code
+runs as an ordinary container process, so a container escape is a cluster
+problem. Run against the trusted corpus only. gVisor and ephemeral namespaces
+remain out of scope, and are why `Builder` and `Verifier` are separate
+protocols.

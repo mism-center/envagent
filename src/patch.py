@@ -10,7 +10,9 @@ re-resolved -- changing the base image invalidates the pin.
 
 from __future__ import annotations
 
+import dataclasses
 import re
+import shlex
 from typing import NamedTuple
 
 from envspec import EnvSpec, MountContract
@@ -18,6 +20,9 @@ from envspec import EnvSpec, MountContract
 ACTIONS = (
     "ADD_APT_PKG",
     "ADD_PKG",
+    # Take a name back out of pkg_specs: the index has no such project
+    # (UNKNOWN_DISTRIBUTION). The usual case is our own undeclared-import guess.
+    "REMOVE_PKG",
     "PIN_PKG",
     "UNPIN_PKG",
     "CHANGE_INTERPRETER_VERSION",
@@ -27,10 +32,18 @@ ACTIONS = (
     "SET_ENV_VAR",
     "ADD_PRE_INSTALL_CMD",
     "FIX_MOUNT_CONTRACT",
+    # Correct the annotation's entry point to one the repo demonstrably ships
+    # (driver.py checks grounding against evidence.examples and caps it at two
+    # per job). Recorded on the verdict as a proposal against the annotation.
+    "SET_ENTRYPOINT",
+    # The example was killed at the L3 deadline while running. Extend it once
+    # or twice (driver bounds it by l3_timeout_max_s); a passing run then
+    # proposes `expected_runtime_s` to the annotation.
+    "SET_L3_TIMEOUT",
     "ESCALATE",
 )
 
-_MOUNT_FIELDS = ("code_path", "input_path", "output_path", "workdir", "extra_path")
+_MOUNT_FIELDS = ("code_path", "input_path", "output_path", "workdir", "extra_path", "writable_copy")
 _INSTALLERS = ("pip", "conda", "mamba", "renv", "pkg")
 
 
@@ -77,6 +90,52 @@ def _kv(arg: str, action: str) -> tuple[str, str]:
     return k.strip(), v.strip()
 
 
+# ADD_PRE_INSTALL_CMD is free shell, and the first corpus run showed what free
+# shell gets used for when a probe is wrong: shim modules written into
+# site-packages (`opencv_python/__init__.py` containing `from cv2 import *`,
+# `ipython.py` containing `from IPython import *`) so the L1 import check would
+# pass, and an /etc/hosts entry for pypi.org to route around a DNS outage. Each
+# made a rung report success for an image that had not earned it. The patterns
+# below name those shapes; the message tells the agent which typed action owns
+# the real fix.
+_PRE_INSTALL_FORBIDDEN: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"site-packages|dist-packages|getsitepackages|getusersitepackages|"
+                r"sysconfig\.get_path|\.libPaths\(|/usr/lib/R/(?:site-)?library|/usr/local/lib/R"),
+     "writes into the interpreter's package directory -- a package belongs in "
+     "pkg_specs (ADD_PKG / PIN_PKG), and an import-name mismatch is a probe bug, "
+     "not an image bug"),
+    (re.compile(r"/etc/hosts|/etc/resolv\.conf|resolv\.conf"),
+     "rewrites name resolution -- a DNS/registry outage is INFRA_UNAVAILABLE and "
+     "is retried at no cost, never repaired in the spec"),
+    (re.compile(r"\bpip\s+(?:install|download)\b|\binstall\.packages\s*\(|\bmicromamba\s+install\b|"
+                r"\bconda\s+install\b|\bR\s+CMD\s+INSTALL\b"),
+     "installs a package through the shell -- use ADD_PKG / PIN_PKG so the "
+     "dependency is in pkg_specs where the lockfile, the L1 probe and the "
+     "failure attribution can see it"),
+    (re.compile(r"\bln\s+-s\S*\s+\S*python|/usr/local/bin/python\b"),
+     "rewires the interpreter -- pick a base with CHANGE_INTERPRETER_VERSION / "
+     "CHANGE_BASE_IMAGE"),
+    (re.compile(r"ENVBUILD_|::envbuild::"),
+     "touches envbuild's own probe/marker machinery"),
+]
+
+
+def forbidden_pre_install(cmd: str) -> str | None:
+    """Why this ADD_PRE_INSTALL_CMD argument is refused, or None if it is fine."""
+    for pat, why in _PRE_INSTALL_FORBIDDEN:
+        if pat.search(cmd or ""):
+            return why
+    return None
+
+
+# installer -> (base-image pattern that provides it, the base to suggest).
+_INSTALLER_BASE = {
+    "mamba": (r"micromamba|mambaforge|miniforge", "mambaorg/micromamba:1.5"),
+    "conda": (r"miniconda|anaconda|miniforge|mambaforge|micromamba", "continuumio/miniconda3:24.3.0-0"),
+    "renv":  (r"rocker/|r-base|r-ver", "rocker/r-ver:4.4.1"),
+}
+
+
 def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
     """Apply `action` with `arg`. Raises PatchError on an unusable argument."""
     if action not in ACTIONS:
@@ -88,24 +147,66 @@ def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
         # No spec change -- the driver turns this into a verdict.
         return PatchResult(new, False, "escalated; spec unchanged")
 
+    if action == "SET_ENTRYPOINT":
+        # The spec's `entrypoint` is informational in mounted mode (nothing is
+        # baked); the driver updates the job's L2/L3 command alongside.
+        if not arg:
+            raise PatchError("SET_ENTRYPOINT requires a command")
+        try:
+            new.entrypoint = shlex.split(arg)
+        except ValueError as exc:
+            raise PatchError(f"SET_ENTRYPOINT: unparseable command: {exc}") from exc
+        return PatchResult(new, False, f"entrypoint -> {arg}")
+
     if not arg:
         raise PatchError(f"{action} requires an argument")
 
     if action == "ADD_APT_PKG":
-        if arg in new.apt_packages:
+        # One action may name a family (`libgl1 libglib2.0-0 libxcb1`): still one
+        # attributable repair, but the packages are stored one per entry so a
+        # later single-package repair dedupes against them.
+        pkgs = [p for p in arg.split() if p]
+        if not pkgs or not all(re.fullmatch(r"[a-z0-9][a-z0-9+.\-]*", p) for p in pkgs):
+            raise PatchError(f"not a Debian package list: {arg!r}")
+        fresh = [p for p in pkgs if p not in new.apt_packages]
+        if not fresh:
             raise PatchError(f"apt package {arg!r} already present")
-        new.apt_packages.append(arg)
-        return PatchResult(new, False, f"apt += {arg}")
+        new.apt_packages.extend(fresh)
+        return PatchResult(new, False, f"apt += {' '.join(fresh)}")
 
     if action == "ADD_PKG":
-        if any(req_name(s) == req_name(arg) for s in new.pkg_specs):
+        # One action may name a family when the rule table does (R's plural
+        # "dependencies ... are not available"): space-separated bare names.
+        items = arg.split() if (" " in arg and not re.search(r"[<>=!~;\[]", arg)) else [arg]
+        added = []
+        for it in items:
+            if any(req_name(s) == req_name(it) for s in new.pkg_specs):
+                continue
+            new.pkg_specs.append(it)
+            added.append(it)
+        if not added:
             raise PatchError(f"package {arg!r} already present")
-        new.pkg_specs.append(arg)
-        return PatchResult(new, False, f"pkg += {arg}")
+        return PatchResult(new, False, f"pkg += {' '.join(added)}")
+
+    if action == "REMOVE_PKG":
+        name = req_name(arg)
+        keep = [s for s in new.pkg_specs if req_name(s) != name]
+        if len(keep) == len(new.pkg_specs):
+            raise PatchError(f"package {arg!r} is not in pkg_specs")
+        new.pkg_specs = keep
+        return PatchResult(new, False, f"pkg -= {name}")
 
     if action == "PIN_PKG":
         if not re.search(r"[=<>~!]", arg):
             raise PatchError("PIN_PKG needs a version constraint, e.g. numpy==1.26.4")
+        if new.pkg_manager in ("renv", "pkg"):
+            # install.packages() takes names, not versions: `BH==1.75.0` became
+            # an R package literally called that (hold-out: epidemics). Version
+            # pinning for R needs remotes::install_version, which the renderer
+            # does not emit in this revision.
+            raise PatchError("PIN_PKG is not supported for R specs in this revision: install.packages() "
+                             "takes names only. ADD_PKG the bare name, or escalate if a specific "
+                             "version is required.")
         new.pkg_specs = _replace_req(new.pkg_specs, arg)
         return PatchResult(new, False, f"pin {arg}")
 
@@ -137,6 +238,13 @@ def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
             raise PatchError(f"installer must be one of {_INSTALLERS}")
         if arg == new.pkg_manager:
             raise PatchError(f"already using {arg}")
+        # The installer must exist in the base. `micromamba install` on
+        # python:3.11-slim is exit 127 (hold-out, biosimulators_tellurium); the
+        # renderer cannot bootstrap a package manager, so the base has to carry it.
+        need = _INSTALLER_BASE.get(arg)
+        if need and not re.search(need[0], new.base_image):
+            raise PatchError(f"{arg} is not available in {new.base_image.split('@')[0]}; "
+                             f"CHANGE_BASE_IMAGE {need[1]} first (the base provides the installer)")
         new.pkg_manager = arg
         return PatchResult(new, False, f"installer -> {arg}")
 
@@ -146,7 +254,14 @@ def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
         if arg == new.install_mode:
             raise PatchError(f"already in {arg} mode")
         new.install_mode = arg
-        return PatchResult(new, False, f"install_mode -> {arg}")
+        note = f"install_mode -> {arg}"
+        if arg == "installed" and new.mount.extra_path:
+            cp = new.mount.code_path.rstrip("/")
+            kept = tuple(p for p in new.mount.extra_path if not (p == cp or p.startswith(cp + "/")))
+            if kept != tuple(new.mount.extra_path):
+                new.mount = dataclasses.replace(new.mount, extra_path=kept)
+                note += "; extra_path entries under code_path dropped (installed package is what runs)"
+        return PatchResult(new, False, note)
 
     if action == "SET_ENV_VAR":
         k, v = _kv(arg, action)
@@ -156,8 +271,20 @@ def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
     if action == "ADD_PRE_INSTALL_CMD":
         if arg in new.pre_install:
             raise PatchError("command already present")
+        bad = forbidden_pre_install(arg)
+        if bad:
+            raise PatchError(f"ADD_PRE_INSTALL_CMD refused: {bad}")
         new.pre_install.append(arg)
         return PatchResult(new, False, f"pre_install += {arg}")
+
+    if action == "SET_L3_TIMEOUT":
+        if not re.fullmatch(r"\d{2,5}", arg) or int(arg) < 60:
+            raise PatchError("SET_L3_TIMEOUT needs a whole number of seconds >= 60, e.g. 1200")
+        secs = int(arg)
+        if new.l3_timeout_s is not None and secs <= new.l3_timeout_s:
+            raise PatchError(f"l3_timeout_s is already {new.l3_timeout_s}; an extension must be longer")
+        new.l3_timeout_s = secs
+        return PatchResult(new, False, f"l3_timeout_s -> {secs}")
 
     # FIX_MOUNT_CONTRACT -- "field=value"; extra_path appends, the rest replace.
     k, v = _kv(arg, action)
@@ -168,11 +295,12 @@ def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
         paths = tuple(p for p in v.split(":") if p)
         if set(paths) <= set(m.extra_path):
             raise PatchError("extra_path entries already present")
-        new.mount = MountContract(
-            m.code_path, m.input_path, m.output_path, m.workdir,
-            tuple(dict.fromkeys(m.extra_path + paths)),
-        )
+        new.mount = MountContract(**{**m.to_dict(), "extra_path": tuple(dict.fromkeys(m.extra_path + paths))})
     else:
+        if k == "writable_copy":
+            if v.lower() not in ("true", "false", "1", "0", "yes", "no"):
+                raise PatchError("writable_copy must be true or false")
+            v = v.lower() in ("true", "1", "yes")
         if getattr(m, k) == v:
             raise PatchError(f"mount.{k} is already {v!r}")
         new.mount = MountContract(**{**m.to_dict(), k: v, "extra_path": m.extra_path})

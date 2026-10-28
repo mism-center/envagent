@@ -6,6 +6,11 @@ but not an argument.
 
 ## Procedure
 
+0. **Check the plane.** If `classification.routes_to == "infra"` (or the attempt
+   result says `"charged": false`), stop reading: the substrate failed, the
+   attempt was not charged, and `patch` will be refused. Re-run
+   `envbuild attempt` with the same spec. Do not "fix" DNS, a registry, or an
+   index from inside the spec.
 1. **Read the attribution first, not the stderr.** `failed_step` names the index,
    kind and *EnvSpec field* of the instruction that failed. `apt` means the
    problem is in `apt_packages`; `pkg` means `pkg_specs`. That collapses the

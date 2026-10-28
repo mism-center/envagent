@@ -16,18 +16,19 @@ src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # repo root = this script'
 skills_dir="${1:-$HOME/.claude/skills}"
 dest="$skills_dir/$name"
 
-for required in SKILL.md config.ini compose.yaml compose.host.yaml specs src/driver.py \
+for required in SKILL.md config.ini deploy specs src/driver.py \
                 harness/Dockerfile; do
   test -e "$src/$required" || { echo "$required missing in $src"; exit 1; }
 done
 
 # Clear only the skill's own targets so renamed/removed files do not linger.
-rm -rf "$dest/SKILL.md" "$dest/config.ini" "$dest/compose.yaml" "$dest/compose.host.yaml" \
+rm -rf "$dest/SKILL.md" "$dest/config.ini" "$dest/deploy" \
        "$dest/run.sh" \
        "$dest/specs" "$dest/src" "$dest/scripts" "$dest/harness" "$dest/fixtures"
 mkdir -p "$dest/specs" "$dest/src" "$dest/scripts" "$dest/harness/pi" "$dest/fixtures"
 
-cp "$src/SKILL.md" "$src/config.ini" "$src/compose.yaml" "$src/compose.host.yaml" "$dest/"
+cp "$src/SKILL.md" "$src/config.ini" "$dest/"
+cp -r "$src/deploy" "$dest/deploy"
 cp "$src/run.sh" "$dest/run.sh"
 cp "$src"/specs/*.md         "$dest/specs/"
 cp "$src"/src/*.py           "$dest/src/"

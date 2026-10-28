@@ -1,0 +1,106 @@
+# One-time cluster setup for envbuild:
+#
+#     kubectl apply -f deploy/envbuild.yaml
+#
+# Then create the registry credential separately -- it is the one object with a
+# secret in it, so it does not belong in a tracked file:
+#
+#     kubectl -n default create secret generic envbuild-registry-auth \
+#         --from-file=.dockerconfigjson=$HOME/.docker/config.json \
+#         --type=kubernetes.io/dockerconfigjson
+#
+# NAMESPACE: `default`, because that is where `irods-pvc` lives and a PVC cannot
+# be mounted across namespaces. The cost is real and worth naming: `delete` on
+# pods in `default` is broader than envbuild needs, since anything else running
+# there is in reach. envbuild only ever deletes pods whose names it generated
+# (`envbuild-<job>-*`), so the capability is wider than the behaviour. If that
+# gap matters later, the fix is a dedicated namespace with its own PVC bound to
+# the same share -- not a change to this code.
+#
+# The point of this file is the Role. envbuild creates pods and reads their logs;
+# it does not exec into them. `pods/exec` together with `pods/create` is arbitrary
+# code execution in the namespace -- create a pod mounting any Secret, exec in,
+# read it. The agent is LLM-driven, so that verb is exactly what it must not have.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: envbuild
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: envbuild-runner
+  namespace: default
+rules:
+  # Build pods and verification pods, created and reaped per attempt.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "delete"]
+  # The only channel results come back on.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Preflight: prove the two rules above are in force before spending a build
+  # finding out they are not.
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["selfsubjectaccessreviews"]
+    verbs: ["create"]
+  # DELIBERATELY ABSENT, and each one for its own reason:
+  #   pods/exec, pods/attach  -- arbitrary code execution in the namespace
+  #   pods/portforward        -- a tunnel out of the sandbox
+  #   secrets                 -- the registry credential is read by the kubelet
+  #                              and by Kaniko, never by this process
+  #   persistentvolumeclaims  -- the claims below are operator-owned
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: envbuild-runner
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: envbuild
+    namespace: default
+roleRef:
+  kind: Role
+  name: envbuild-runner
+  apiGroup: rbac.authorization.k8s.io
+---
+# Scratch envbuild owns: rendered Dockerfiles, Kaniko's digest file, and each
+# job's inputs/ and outputs/. ReadWriteMany because the agent and the pods it
+# creates mount it at the same time. Size for concurrent jobs, not for one --
+# each job's directory is removed when the job closes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: envbuild-work
+  namespace: default
+spec:
+  accessModes: ["ReadWriteMany"]
+  # azurefile-csi on AKS. Any RWX class works.
+  storageClassName: azurefile-csi
+  resources:
+    requests:
+      storage: 50Gi
+---
+# This is how `--network none` survives the move off docker. An empty Ingress and
+# Egress rule set denies everything, including DNS, for any pod carrying the
+# label -- which K8sVerifier applies to every run with `network=False`.
+#
+# A pod no policy selects gets unrestricted traffic, so this only works if the
+# cluster's CNI actually enforces NetworkPolicy. Prove that before trusting a
+# corpus row: run an L3 that tries to reach the network and confirm it FAILS.
+# An unenforced policy costs nothing at apply time and silently voids every
+# "verified" verdict afterwards.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: envbuild-deny-all
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      envbuild.io/network: deny
+  policyTypes: ["Ingress", "Egress"]
