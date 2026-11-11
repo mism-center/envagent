@@ -82,6 +82,9 @@ Notes on the load-bearing fields:
   or `none`. Success is defined against the repo's example
   (`specs/success_criteria.md`), so this is what `verified` refers to.
 - **`l3_timeout_s`** — the allowance the example run was given.
+- **`l3_claim`** — which L3 was proved on a clean run: wrote to `output_path`, stdout only, or
+  `weak: ...` when the command exited 0 having printed only a usage banner (an argument-less CLI).
+  A `weak` claim is not a benchmark success (`scripts/score.py` reports it as `verified_weak`).
 - **verdict `annotation_corrections[]`** — `{field, was, now, evidence,
   applied_by, outcome}` for every change the builder made to the annotation's
   reading of the repo; `outcome` ∈ `verified | helped | rejected | unverified`

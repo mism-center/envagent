@@ -11,7 +11,7 @@ Harness (191 offline checks, pyflakes clean):
 - Kaniko pod resources (config [builder] request_*/limit_*) and --kaniko-dir on the work claim
 - harness: pi pinned (PI_VERSION), provider id resolved from `pi --list-models`, run.agent_runtime recorded
 
-Benchmarks: hold-out passes 3-5 (5/19, 4/19, 4/19; 0 false-verified), single-repo rerun aks-rerun-6 (viva-mgen
+Benchmarks: hold-out passes 3-5 (6/19 as scored then — 5/19 re-scored under the current policy — 4/19, 4/19; 0 false-verified), single-repo rerun aks-rerun-6 (viva-mgen
 verified via git deps), reports in docs/. Ground truth: alternate_example_ok, policy notes, viva-mgen example corrected.
 
 Docs: STATE.md (team summary), HANDOFF.md (resume checklist + 13 open items), pass reports, change log through rev 4.14.

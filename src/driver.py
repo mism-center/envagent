@@ -470,11 +470,11 @@ def resolve_corrections(state: dict, reached: str, ok: bool, failure_class: str 
             c["outcome"] = "helped"
 
 
-_TESTS_CMD = re.compile(r"^\s*(pytest|py\.test|python -m pytest|make\s+(test|check)|R CMD check|"
+_TESTS_CMD = re.compile(r"^\s*(pytest|py\.test|python3? -m pytest|make\s+(test|check)|R CMD check|"
                         r"Rscript -e ['\"]?(testthat|devtools)::|npm test|julia .*Pkg\.test|tox|nox)\b")
 
 
-_TEST_RUNNER = re.compile(r"^\s*(pytest|py\.test|python -m pytest|tox|nox|make (test|check)|R CMD check|"
+_TEST_RUNNER = re.compile(r"^\s*(pytest|py\.test|python3? -m pytest|tox|nox|make (test|check)|R CMD check|"
                           r"Rscript -e ['\"]?(testthat|devtools)::|julia .*Pkg\.test|npm test|cargo test)\b")
 
 
@@ -531,8 +531,17 @@ def choose_entry(ann: dict, ev: dict, findings: list[dict]) -> tuple[str, str, d
     # not the example (decision 2026-10-07): it is chosen only when the repo
     # documents no script to run. viva-mgen's README has both; `pytest` came
     # first and the run verified on tests only.
-    smokes = [e for e in (ev.get("examples") or []) if e["tier"] == "smoke" and not e.get("placeholders")]
-    smoke = next((e for e in smokes if not is_test_runner(e["command"])), None) or (smokes[0] if smokes else None)
+    usable = [e for e in (ev.get("examples") or []) if not e.get("placeholders")]
+    smokes = [e for e in usable if e["tier"] == "smoke"]
+    # "Documents" means the root README or an examples/ layout -- see
+    # examples.auto_choosable for what does not qualify and why.
+    scripts = [e for e in usable if not is_test_runner(e["command"]) and examples_mod.auto_choosable(e)]
+    # Order: a presented smoke script; a presented `full` one (viva-mgen's only
+    # documented run is `.../fig2-growth/sims/run.py`, which the name hint tiers
+    # as full -- still the example, and L3 has its own budget); the test suite;
+    # then whatever is left.
+    smoke = (next((e for e in scripts if e["tier"] == "smoke"), None) or (scripts[0] if scripts else None)
+             or next((e for e in smokes if is_test_runner(e["command"])), None) or (smokes[0] if smokes else None))
     if smoke:
         return smoke["command"], "repo_example", {
             "field": "entry_points[0].command", "was": entries[0] if entries else None,
@@ -976,6 +985,8 @@ def cmd_attempt(args, cfg) -> None:
         # this model; the scorer separates verified-from-memory from verified-by-search.
         "spec_source": state.get("spec_source", "evidence") if attempt_no == 1 else "search",
         "l3_timeout_s": (lad.notes or {}).get("l3_timeout_s") if build.ok else None,
+        # Which L3 was proved (wrote outputs / stdout only / `weak: usage banner`).
+        "l3_claim": (lad.notes or {}).get("l3_claim") if build.ok else None,
         # False when the substrate failed: the row is kept (the corpus should
         # show how often infra fails) but it does not count against the budget
         # and is not a model failure. Filter on it before reading histograms.

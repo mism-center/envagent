@@ -167,9 +167,12 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
                 # an alternate script ran clean but the ground truth has not approved one:
                 # counted as success (it is a shipped example), flagged for the human
                 t["flags"] = ["alternate example: set alternate_example_ok in ground truth to confirm"]
-            t["success"] = ok and not t["honesty"] and not t["verified_tests"]
+            # O2: exit 0 on a usage banner proves the image, not the example.
+            t["verified_weak"] = ok and str((rows[-1] if rows else {}).get("l3_claim") or "").startswith("weak")
+            t["success"] = ok and not t["honesty"] and not t["verified_tests"] and not t["verified_weak"]
             t["spec_source"] = v.get("spec_source") or "evidence"
-            t["attribution"] = None if t["success"] else ("policy:alternate_example" if t["verified_tests"] else attribute(v, rows, g))
+            t["attribution"] = None if t["success"] else ("policy:alternate_example" if t["verified_tests"]
+                                                          else "weak_verification" if t["verified_weak"] else attribute(v, rows, g))
             t["correct"] = t["success"]
         else:
             t["success"] = None
@@ -200,6 +203,7 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
         "attribution": dict(attr),
         "corrected_annotation_and_succeeded": sum(1 for t in b if t["success"] and t["corrections"]),
         "verified_tests_only": sum(1 for t in b if t.get("verified_tests")),
+        "verified_weak": sum(1 for t in b if t.get("verified_weak")),
         # Cross-job memory: how many successes started from a remembered spec.
         # Report both; a pass where every success is from memory has measured
         # recall, not search.
@@ -254,6 +258,7 @@ def main(argv=None) -> int:
     print(f"  false-verified       {res['false_verified']}" + ("   <-- MUST BE 0" if res["false_verified"] else ""))
     print(f"  succeeded after correcting the annotation: {res['corrected_annotation_and_succeeded']}")
     print(f"  verified on a test suite only (not counted): {res['verified_tests_only']}")
+    print(f"  verified on a usage banner only (not counted): {res['verified_weak']}")
     print(f"  of the successes, started from memory:       {res['success_from_memory']}")
     print(f"  of the successes, on an alternate shipped example: {res['success_on_alternate_example']}")
     print("\n  failure attribution (buildable, non-success):")

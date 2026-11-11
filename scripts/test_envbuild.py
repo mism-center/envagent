@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pyyaml"]
+# dependencies = ["pyyaml", "pip", "setuptools"]  # pip/setuptools: the H11 L1-probe check imports them; a uv env has neither
 # ///
 """Offline regression suite: renderer, every typed action, classifier rules,
 normaliser goldens, evidence scan, record guards.
@@ -1553,7 +1553,11 @@ def _d_choose_entry():
     assert (cmd, src, corr) == ("Rscript inst/examples/01.R", "annotation", None)
     ann = {"entry_points": [{"command": "R"}]}
     cmd, src, corr = driver.choose_entry(ann, ev, findings)
-    assert (cmd, src) == ("pytest", "repo_example") and corr["was"] == "R" and corr["outcome"] == "pending", corr
+    # Decision 2026-10-07: a test suite never counts as the example, so a README
+    # script tiered `full` (the only documented run) is chosen before `pytest`.
+    assert (cmd, src) == ("python scripts/reproduce.py", "repo_example") and corr["was"] == "R" and corr["outcome"] == "pending", corr
+    ev["examples"].pop(0)                              # nothing documented but the tests
+    assert driver.choose_entry(ann, ev, findings)[0] == "pytest"
     cmd, src, corr = driver.choose_entry({}, {"examples": []}, [])
     assert (cmd, src, corr) == ("", "none", None)
 
@@ -2219,6 +2223,74 @@ def _l_l1_canonical():
     env["ENVBUILD_DISTS"] = "pyyaml,no-such-dist-xyz"
     r = _sp.run([sys.executable, "-c", ladder._RUNNER], env=env, capture_output=True, text=True, timeout=120)
     assert r.returncode == 1 and "no-such-dist-xyz" in r.stderr and "yaml" not in r.stderr.split("no-such-dist-xyz")[0], r.stderr
+
+
+@check("ladder O2: exit 0 on a usage banner with no outputs is recorded as a weak L3 claim; a print-only example is not")
+def _l_usage_only():
+    def climb_with(log):
+        class V:
+            def run(self, image_ref, code_ref, cmd, mount, timeout_s, **kw):
+                return ladder.RunResult(True, 0, "", log)        # merged log arrives as stderr
+            def outputs_listing(self): return []
+        return ladder.climb(V(), "img", "/models/m/1.0", spec(), {"kind": "none", "value": ""}, "pytest -q", 60)
+    weak = climb_with("usage: covasim [-h] {run,version} ...\n\noptions:\n  -h, --help\n")
+    assert weak.reached == "L3" and weak.notes["l3_claim"].startswith("weak"), weak.notes
+    real = climb_with("Running 2020-03-01 ( 0/60) (0.00 s)\nusage: of beds 12\n")
+    assert not real.notes["l3_claim"].startswith("weak"), real.notes
+
+
+@check("deploy: the agent Job pod declares resources (O5)")
+def _agent_job_resources():
+    import yaml as _y
+    doc = _y.safe_load((ROOT / "deploy" / "agent-job.yaml").read_text(encoding="utf-8"))
+    r = doc["spec"]["template"]["spec"]["containers"][0]["resources"]
+    assert r["requests"]["memory"] == "1Gi" and r["limits"]["memory"] == "4Gi", r
+
+
+@check("examples H28: a CI packaging step (`python3 -m build`) is not an example; a CI test run or a step running the repo's own script is (starsim)")
+def _ex_ci_repo_code_only():
+    root = _repo({"pkg/__init__.py": "", "pkg/demo.py": "", "scripts/run_sim.py": "", "tests/test_a.py": ""})
+    ci = [{"file": ".github/workflows/x.yml", "runs": ["python3 -m build\npython -m twine check dist/*\n"
+           "python scripts/run_sim.py\npython -m pkg.demo\npython3 -m pytest tests\npython tools/gone.py\n"]}]
+    cmds = [e["command"] for e in examples.discover(root, _files(root), ci=ci)]
+    assert "python scripts/run_sim.py" in cmds and "python -m pkg.demo" in cmds and "python3 -m pytest tests" in cmds, cmds
+    assert not any("build" in c or "twine" in c or "gone" in c for c in cmds), cmds
+    assert driver.is_test_runner("python3 -m pytest tests")
+
+
+@check("driver H28: a CI-sourced script never outranks the test suite as the chosen entry; a README script still does")
+def _d_ci_not_headline():
+    ex = [{"command": "pytest", "source": "tests", "tier": "smoke", "placeholders": False},
+          {"command": "python scripts/run_sim.py", "source": "ci:.github/workflows/x.yml", "tier": "smoke", "placeholders": False}]
+    assert driver.choose_entry({}, {"examples": ex}, [])[0] == "pytest"
+    ex.append({"command": "python demo.py", "source": "README.md", "tier": "smoke", "placeholders": False})
+    assert driver.choose_entry({}, {"examples": ex}, [])[0] == "python demo.py"
+
+
+@check("baseselect H28: one stray .jl in a Python repo is not a Julia model; Project.toml still decides")
+def _b_stray_julia():
+    import baseselect as _bs
+    assert _bs.select({"languages": {"python": 111, "julia": 1}, "python": {}}).pkg_manager == "pip"
+    assert _bs.select({"languages": {"python": 3, "julia": 1}, "julia": {"deps": ["Catalyst"]}}).pkg_manager == "pkg"
+
+
+@check("examples H29: indented README commands are read beside fenced ones; venv creation is not an example; prose is not a command (viva-mgen, viva-cpm)")
+def _ex_readme_indented():
+    root = _repo({"README.md": "## Install\n\n```bash\npython -m venv .venv && source .venv/bin/activate\npytest\n```\n\n"
+                  "make sure you have numpy.\n\nRun a study:\n\n    python studies/run.py\n", "studies/run.py": ""})
+    cmds = [e["command"] for e in examples.discover(root, _files(root))]
+    assert cmds == ["pytest", "python studies/run.py"], cmds
+
+
+@check("examples H29: simple-named examples rank first in a layout dir; scripts/, nested READMEs and CI are listed but not auto-chosen over tests (covasim, viva-mgen)")
+def _ex_auto_choosable():
+    root = _repo({"examples/t05_change_beta_sinusoid.py": "", "examples/simple.py": "", "examples/simple.R": "", "scripts/regen_parca.py": "",
+                  "data/README.md": "```\npython data/scrape.py\n```\n", "data/scrape.py": "", "tests/test_a.py": ""})
+    ex = examples.discover(root, _files(root))
+    assert driver.choose_entry({}, {"examples": ex}, [])[0] == "python examples/simple.py", ex
+    only = [e for e in ex if not e["source"].startswith("examples")]
+    assert {e["source"] for e in only} >= {"scripts", "data/README.md", "tests"}, only
+    assert driver.choose_entry({}, {"examples": only}, [])[0] == "pytest", only
 
 
 # ---------------------------------------------------------------- hold-out 3: H16 and H12b

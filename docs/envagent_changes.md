@@ -588,3 +588,41 @@ Image `rev4.14` (= rev 4.13 tree) ran six single-repo reruns (`rerun_aks-rerun-6
   and cannot be redirected to a volume; a namespace with a 9 Gi ephemeral quota (~700 Mi free) cannot run it at any
   setting. The structural fix is a volume-backed builder (BuildKit rootless, state on the work PVC) behind the existing
   `Builder` protocol — scoped as the next design item after `aks-holdout-6`.
+
+# rev 4.15 — pre-pass dry run on the pinned hold-out sources (2026-11-11; 198 checks, pyflakes clean, not live-tested)
+
+Before spending `aks-holdout-6`, `envbuild init --no-memory` was run locally over 18 of the 20 hold-out repos at their
+pinned shas (viva-munk skipped for size; `viva-yalla` no longer exists on GitHub — the checkout on `irods-pvc` is the
+only copy). The rev 4.14 chooser edit ("prefer a script over a test runner") had been checked on viva-mgen only; on the
+real sources it chose a non-example on five repos, one of which would have scored as a success.
+
+- **H28 (would have been a false-verified)** starsim drafted `julia:1.10` (one `.jl` under `docs/` among 111 `.py`) with
+  the command `python3 -m build` taken from the PyPI release workflow — exit 0 in any image, headline tier, ground-truth
+  example null → counted. `src/baseselect.py`: Julia by file count only when it dominates (Project.toml still decides).
+  `src/examples.py` `_runs_repo_code()`: a CI step is an example only if it is a test run or runs a file/module that
+  exists in the repo. `python3 -m pytest` is now recognised as a test runner (`_TESTS_CMD`, `_TEST_RUNNER`).
+- **H29** `src/examples.py` `auto_choosable()` + `src/driver.py` `choose_entry`: `init` picks over the test suite only
+  what the authors present — the root README or a script under `examples/ demo/ tutorials/`. `scripts/` (viva-mgen:
+  `extract_constant_provenance.py`), nested READMEs (covasim `data/README.md`: a web scraper; covid-sim
+  `Rscripts/PlotRuns.R`) and CI steps stay listed for the agent but are never chosen automatically. Order: presented
+  smoke script → presented `full` script → test suite → anything.
+- **H29** README parsing reads 4-space indented code beside fenced blocks (viva-mgen's study run and c302's
+  `python c302/c302_Pharyngeal.py B` were invisible); `python -m venv`, `uv venv`, `maturin` lines are install steps
+  (viva-cpm's entry was `python -m venv .venv && source .venv/bin/activate`).
+- **H29** layout ranking: the repo's dominant language, then `simple|minimal|quick|hello|basic|demo|example` names, then
+  depth and length (covasim: `examples/simple.py`, was `t05_change_beta_sinusoid.py`).
+- **O2** `src/ladder.py` `usage_only()`: exit 0 with no outputs and a first-line `usage:` banner records
+  `l3_claim = "weak: ..."` on the attempt row; `scripts/score.py` reports `verified_weak` and does not count it.
+  The verdict status is unchanged (one observation — no rule yet).
+- **O5** `deploy/agent-job.yaml`: the agent container declares `resources` (500m/1Gi/2Gi → 2/4Gi/8Gi).
+- Linux-only suite failures fixed (the suite had only been run on Windows): structural candidates normalise `\`
+  explicitly; the suite's PEP 723 header declares `pip` and `setuptools` for the H11 probe check.
+
+Dry-run result after the fixes: the drafted entry equals the ground-truth example on every repo that has one, except
+viva-biofilm (README study run chosen; ground truth still says `pytest -q`).
+
+**Consequence for the pre-registration.** starsim, epidemics, epimodel and biosimulators_tellurium document no runnable
+script — only a test suite — so under the 7 Oct policy their best possible outcome is `verified_tests`, not a success.
+The honest ceiling for pass 6 is the four stable repos + viva-mgen + viva-membrane-actin + c302 + covasim-class repeats,
+i.e. about 6–7/19, not 8–10. Raising it needs a new mechanism (README code blocks / R vignettes as the example), which
+is a policy decision.

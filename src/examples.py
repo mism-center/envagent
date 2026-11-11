@@ -28,6 +28,7 @@ the annotation itself. See specs/success_criteria.md.
 
 from __future__ import annotations
 
+import collections
 import re
 import shlex
 from pathlib import Path
@@ -48,7 +49,7 @@ _INFRA_SCRIPT = re.compile(r"ec2|aws|gcp|azure|deploy|docker|push|rsync|bake|clu
                            r"publish|upload|download|setup|install|build[-_]?image|export|scaffold|"
                            r"lint|format|bump", re.I)
 _PLACEHOLDER = re.compile(r"<[A-Za-z_][\w ]*>|\[[\w\- ]+(?:,[\w\- ]+)*\]|\{[\w]+\}")
-_INSTALL_ONLY = re.compile(r"^\s*(?:uv run |pipenv run )?(?:pip3?|python3? -m pip|conda|mamba|micromamba|uv pip|"
+_INSTALL_ONLY = re.compile(r"^\s*(?:uv run |pipenv run )?(?:pip3?|python3? -m pip|python3? -m venv|uv venv|virtualenv|maturin|conda|mamba|micromamba|uv pip|"
                            r"npm|apt(?:-get)?|brew|Rscript -e ['\"]?(?:install\.packages|remotes::|devtools::)|"
                            r"R CMD INSTALL|git clone|docker|make install)\b")
 _FULL_HINT = re.compile(r"reproduce|paper|figure|fig\d|all_?figures|full|benchmark|sweep|batch|train", re.I)
@@ -61,6 +62,7 @@ _REL_FILE = re.compile(r"""['"]((?![/~$]|[A-Za-z]:)[\w][\w./\-]*\.(?:%s))['"]"""
 
 EXAMPLE_DIRS = ("examples", "example", "demo", "demos", "scripts", "inst/examples",
                 "inst/scripts", "vignettes", "notebooks", "tutorials")
+AUTO_DIRS = ("examples", "example", "demo", "demos", "inst", "tutorials")
 _MAX_EXAMPLES = 40
 
 
@@ -93,7 +95,12 @@ def _file_token(command: str) -> str | None:
 
 def _from_readme(root: Path, text: str, source: str) -> list[dict]:
     out = []
-    blocks = _FENCE.findall(text) or [text]
+    fenced = _FENCE.findall(text)
+    # A README with fences can still show commands as 4-space indented code
+    # (viva-mgen: the study run). Outside fences only indented lines are read,
+    # so prose starting with "make sure ..." is not taken for a command.
+    blocks = fenced + [ln for ln in _FENCE.sub("", text).splitlines() if re.match(r"(?: {4,}|\t)\S", ln)] \
+        if fenced else [text]
     for block in blocks:
         for m in _RUN_LINE.finditer(block):
             cmd = _clean(m.group(1))
@@ -144,16 +151,65 @@ def _from_tests(root: Path, files: list[str], readme: str) -> list[dict]:
     return out
 
 
-def _from_ci(ci: list[dict]) -> list[dict]:
+_CI_TEST = re.compile(r"^\s*(pytest|py\.test|python3? -m pytest|tox|nox|make\s+(test|check)|R CMD check|"
+                      r"Rscript -e ['\"]?(testthat|devtools)::|julia .*Pkg\.test)\b")
+
+
+def _runs_repo_code(cmd: str, files: list[str]) -> bool:
+    """A CI step counts as an example only if it runs a test suite or the
+    repo's own code. starsim's release workflow runs `python3 -m build`: it
+    exits 0 in any image with `build` installed and says nothing about the
+    model, yet it was chosen as the headline example and would have verified.
+    """
+    if _CI_TEST.match(cmd):
+        return True
+    posix = {f.replace("\\", "/") for f in files}
+    tok = _file_token(cmd)
+    if tok:
+        return tok.lstrip("./") in posix
+    m = re.search(r"\s-m\s+([A-Za-z_]\w*)", cmd)          # `python -m pkg.mod`: pkg must be local
+    return bool(m) and any(f == m.group(1) + ".py" or f.startswith(m.group(1) + "/")
+                           or f.startswith("src/" + m.group(1) + "/") for f in posix)
+
+
+def _from_ci(ci: list[dict], files: list[str]) -> list[dict]:
     out = []
     for wf in ci or []:
         for step in wf.get("runs", []) or []:
             for m in _RUN_LINE.finditer(step):
                 cmd = _clean(m.group(1))
-                if cmd and not _INSTALL_ONLY.match(cmd):
+                if cmd and not _INSTALL_ONLY.match(cmd) and _runs_repo_code(cmd, files):
                     out.append({"command": cmd, "source": f"ci:{Path(wf.get('file', '')).as_posix()}", "tier": "smoke",
                                 "file": _file_token(cmd), "placeholders": False})
     return out
+
+
+_SIMPLE_NAME = re.compile(r"simple|minimal|quick|hello|basic|demo|example", re.I)
+
+
+def _layout_rank(e: dict, main_ext: str = "") -> tuple:
+    """Order inside a layout directory: `simple.py` before `t05_change_beta_sinusoid.py`.
+    covasim ships 30 scripts under examples/; directory order put a sinusoid
+    variant first. ponytail: name hint, then depth, then length -- no parsing.
+    """
+    f = e.get("file") or ""
+    if e["source"] not in AUTO_DIRS or not f:
+        return (0, 0, 0, 0)
+    # The repo's dominant language first: covasim ships simple.py and simple.R.
+    return (0 if Path(f).suffix.lower() == main_ext else 1,
+            0 if _SIMPLE_NAME.search(Path(f).stem) else 1, f.count("/"), len(f))
+
+
+def auto_choosable(e: dict) -> bool:
+    """May `init` pick this example over the test suite without a model's
+    judgement? Only what the authors plainly present as the thing to run: the
+    root README, or a script under examples/ demo/ tutorials/. A nested README
+    (covasim data/README.md: a web scraper), scripts/ (viva-mgen: maintenance
+    helpers) and CI steps (starsim: `python3 -m build`) stay listed for the
+    agent to weigh, but never outrank the tests on their own.
+    """
+    src = e["source"]
+    return bool(re.match(r"(?i)readme(\.\w+)?$", src)) or src in AUTO_DIRS
 
 
 def _read(path: Path, limit: int = 200_000) -> str:
@@ -182,10 +238,10 @@ def discover(root: str | Path, files: list[str], ci: list[dict] | None = None,
             found += _from_readme(root, text, name)
     found += _from_tests(root, files, readme)
     found += _from_layout(root, files)
-    found += _from_ci(ci or [])
+    found += _from_ci(ci or [], files)
     if not found:
         for c in candidates or []:
-            c = Path(c).as_posix()
+            c = c.replace("\\", "/")  # Path.as_posix() keeps backslashes on Linux
             interp = "Rscript" if c.endswith((".R", ".r")) else "python"
             found.append({"command": f"{interp} {c}", "source": "structure", "tier": "smoke",
                           "file": c, "placeholders": False})
@@ -197,8 +253,10 @@ def discover(root: str | Path, files: list[str], ci: list[dict] | None = None,
         seen.add(key)
         out.append(ex)
     # Smoke before full within each source; README order otherwise preserved.
+    ext = collections.Counter(Path(f).suffix.lower() for f in files if Path(f).suffix.lower() in (".py", ".r", ".jl"))
+    main_ext = ext.most_common(1)[0][0] if ext else ""
     out.sort(key=lambda e: (0 if e["source"].lower().startswith("readme") else 1,
-                            0 if e["tier"] == "smoke" else 1))
+                            0 if e["tier"] == "smoke" else 1) + _layout_rank(e, main_ext))
     return out[:_MAX_EXAMPLES]
 
 

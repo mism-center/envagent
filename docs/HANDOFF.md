@@ -3,6 +3,14 @@
 Read this first in a new session. It is the list of what is pending, what is open, and how a pass is run — so the
 work continues from the records rather than from memory. `STATE.md` is the narrative; this is the checklist.
 
+> **Update 11 Nov 2026.** Tree is now **rev 4.15** (198 checks; see the rev 4.15 section of `envagent_changes.md`):
+> a local `init` dry run over the pinned hold-out sources found the rev 4.14 chooser picking non-examples (H28/H29,
+> one a would-be false-verified); O2 and O5 are fixed in the tree. Image `rev4.15` is **built locally and hash-probed
+> (28 files match, pi 1.0.4, `azure gpt-5.6-luna` listed) but not pushed**; the tree is **not committed**. Steps 1–2
+> below become: commit, `docker push mismplatform/pi-envagent:rev4.15`, note the digest. The pre-registered 8–10/19
+> should be re-registered at **6–7/19**: four repos document only a test suite. The AKS kubeconfig is
+> `~/.kube/mism-test.yaml` (Windows home), context `mism-test`.
+
 ## 1. Immediate next steps, in order
 
 1. **Commit the tree** (rev 4.14; this handoff is part of it). Suggested message in `docs/COMMIT_MESSAGE.txt`.

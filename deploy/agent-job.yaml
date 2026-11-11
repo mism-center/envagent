@@ -98,6 +98,11 @@ spec:
             - name: docker-config
               mountPath: /home/node/.docker
               readOnly: true
+          # Declared, because a namespace LimitRange default (250m/256Mi) OOM-kills
+          # the agent before `init` and leaves no record at all (HANDOFF O5).
+          resources:
+            requests: {cpu: 500m, memory: 1Gi, ephemeral-storage: 2Gi}
+            limits: {cpu: "2", memory: 4Gi, ephemeral-storage: 8Gi}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

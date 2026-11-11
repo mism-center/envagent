@@ -139,7 +139,9 @@ def select(evidence: dict, annotation: dict | None = None) -> BaseChoice:
     # dominates; a DESCRIPTION or the annotation still decides outright.
     elif declared.startswith("r") or evidence.get("r") or langs.get("r", 0) > max(langs.get("python", 0), langs.get("julia", 0)):
         kind, keys = "r", ["DESCRIPTION" if evidence.get("r") else "*.R"]
-    elif declared == "julia" or evidence.get("julia") or langs.get("julia"):
+    # Same for Julia (starsim: 111 .py, 1 .jl under docs/ -> julia base, zero
+    # pkg_specs): by file count only when Julia dominates; Project.toml decides.
+    elif declared == "julia" or evidence.get("julia") or langs.get("julia", 0) > langs.get("python", 0):
         kind, keys = "julia", ["Project.toml"]
     elif declared.startswith("python") or langs.get("python"):
         kind, keys = "python", sorted(evidence.get("python", {}).get("sources") or ["*.py"])

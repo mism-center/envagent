@@ -15,7 +15,7 @@ applies exactly one typed repair, and repeats within a budget. Every attempt and
 
 | | tuning corpus (7 models) | hold-out (20 unseen repos, pinned commits) |
 |---|---|---|
-| build success (buildable) | **4/5** on every pass since pass 3 (`aks-rev4-3`), seven passes | **4/19** on passes 4 and 5 (same four repos, identical repair chains); pass 3 scored 5/19 under the current policy |
+| build success (buildable) | **4/5** on every pass since pass 3 (`aks-rev4-3`), seven passes | **4/19** on passes 4 and 5 (same four repos, identical repair chains); pass 3 was 6/19 when scored at the time and is 5/19 re-scored under the current policy (starsim's `pytest tests/test_library.py` verification no longer counts; `score_aks-holdout-3.txt` v2) |
 | false-verified | **0** in all 7 passes | **0** in all 5 passes |
 | verdict correctness (incl. controls) | 6/7 since pass 3 | 20 % |
 | LLM-fallback share | 69 % (pre-rev-3 history) → 0 % | 45 % → 40 % |
@@ -40,7 +40,7 @@ differently from the verifier, not builder results — see *Open items*.
 3. **Rev 4 (seven corpus passes).** Repo-example discovery, annotation corrections as proposals, writable-copy mount,
    lockfile pinning, install-mode inference, L3 budget separation, undeclared-import scan → 4/5 stable.
 4. **Hold-out protocol (24 Sep).** 20 unseen repos, one pass per revision, no fixes between models, every non-success
-   sorted into harness bug / new mechanism / repo defect / rule-table entry. Five passes: 1 → 2 → 5 → 4 → 4.
+   sorted into harness bug / new mechanism / repo defect / rule-table entry. Five passes: 1 → 2 → 6 → 4 → 4 as scored at the time (pass 3 is 5 under the current policy).
 5. **Sprint (7–8 Oct), by decision.** Git-sourced deps, R binary packages + per-manager build budget, cross-job memory,
    runner dependencies, module-less distributions, heavy optional extras, Kaniko pod resources. Confirmed on six
    single-repo reruns; **not yet measured on a full pass** (`aks-holdout-6`, pre-registered 8–10/19).

@@ -505,9 +505,27 @@ def climb(verifier, image_ref: str, code_ref: str, spec: EnvSpec, entry: dict,
     result.notes["l3_claim"] = ("ran clean and wrote to output_path"
                                 + (" (harvested from the writable copy)" if spec.mount.writable_copy else "")
                                 if listing else "ran clean; no declared file outputs to verify")
+    # The verifier hands back the merged pod log as stderr, so read both.
+    if not listing and usage_only((r3.stdout or "") + "\n" + (r3.stderr or "")):
+        result.notes["l3_claim"] = "weak: exit 0 but printed only a usage banner; the example did not run"
     # L4 stays None on purpose: reference-trace comparison is out of scope, but
     # the field exists so the record schema does not change when it lands.
     return result
+
+
+_USAGE_BANNER = re.compile(r"(?i)^\s*usage:")
+
+
+def usage_only(output: str) -> bool:
+    """True when a clean run printed nothing but a CLI usage/help banner.
+
+    `python bin/covasim` with no arguments prints usage and exits 0 -- the
+    environment is fine but the example never ran (job-2026-10-13-15ab).
+    ponytail: first-line `usage:` + short output; argparse and click both
+    print it that way. Widen only when the corpus shows another shape.
+    """
+    lines = [ln for ln in (output or "").splitlines() if ln.strip()]
+    return bool(lines) and len(lines) <= 80 and bool(_USAGE_BANNER.match(lines[0]))
 
 
 def rung_index(rung: str) -> int:
