@@ -1,0 +1,57 @@
+run: aks-holdout-6b   trials: 18   buildable trials: 17
+
+  build success         17.6 %   (95% CI 6-41 %)
+  verdict correctness   16.7 %
+  false-verified       0
+  succeeded after correcting the annotation: 3
+  verified on a test suite only (not counted): 1
+  verified on a usage banner only (not counted): 0
+  VOID, source is not the pinned commit (not a trial): c302 (job-2026-11-11-d82a, verified)
+  of the successes, started from memory:       0
+  of the successes, on an alternate shipped example: 0
+
+  failure attribution (buildable, non-success):
+    builder        10
+    infra          1
+    annotation     1
+    unattributed   1
+    policy:alternate_example 1
+
+  median charged attempts   3
+  infra retries (uncharged) 0
+  LLM-fallback share         51.9 %
+  failed_step_index cover.  100.0 %
+
+  per model:
+    catalyst-jl            control (escalated)    trials=1 success=0 correct=0
+    covasim                buildable              trials=1 success=1 correct=1
+    covid-sim              buildable              trials=1 success=0 correct=0
+    covid19model           buildable              trials=1 success=0 correct=0
+    epidemics              buildable              trials=1 success=0 correct=0
+    epimodel               buildable              trials=1 success=0 correct=0
+    physicell              buildable              trials=1 success=0 correct=0
+    starsim                buildable              trials=1 success=0 correct=0
+    viva-amici             buildable              trials=1 success=0 correct=0
+    viva-artistoo          buildable              trials=1 success=0 correct=0
+    viva-biofilm           buildable              trials=1 success=0 correct=0
+    viva-cpm               buildable              trials=1 success=0 correct=0
+    viva-membrane-actin-composite buildable              trials=1 success=0 correct=0
+    viva-mgen              buildable              trials=1 success=1 correct=1
+    viva-munk              buildable              trials=1 success=0 correct=0
+    viva-simbio            buildable              trials=1 success=0 correct=0
+    viva-tumor-tcell       buildable              trials=1 success=1 correct=1
+    viva-yalla             buildable              trials=1 success=0 correct=0
+      - viva-cpm             job-2026-11-11-9c1e: escalated@L0 UNKNOWN_DISTRIBUTION -> builder  ran=python demos/run_cc3d_demos.py [repo_example]
+      - viva-munk            job-2026-11-11-2d1e: error@L2 TIMEOUT -> infra  ran=python -m viva_munk.experiments.test_suite [repo_example]
+      - viva-membrane-actin-composite job-2026-11-11-044d: escalated@L0 UNKNOWN -> builder  ran=python demo/demo_report.py [repo_example]
+      - viva-artistoo        job-2026-11-11-43f1: escalated@L0 UNKNOWN_DISTRIBUTION -> builder  ran=python demo/demo_report.py [repo_example]
+      - viva-yalla           job-2026-11-11-6718: escalated@L0 UNKNOWN_DISTRIBUTION -> builder  ran=python demo/demo_report.py [repo_example]
+      - viva-simbio          job-2026-11-11-8632: failed@L1 DEP_RESOLUTION_CONFLICT -> builder  ran=python demo/demo_report.py [repo_example]
+      - viva-amici           job-2026-11-11-408a: escalated@L0 UNKNOWN_DISTRIBUTION -> builder  ran=python demo/demo_report.py [repo_example]
+      - viva-biofilm         job-2026-11-11-9f67: escalated@L2 RUNTIME_ERROR -> annotation  ran=python workspace/studies/spatial-biofilm-growth/run_study.py [repo_example]
+      - starsim              job-2026-11-11-8ae2: escalated@L2 RUNTIME_ERROR -> builder  ran=pytest [repo_example]
+      - physicell            job-2026-11-11-81d9: escalated@L2 RUNTIME_ERROR -> unattributed  ran=python beta/get_physicell.py [repo_example]
+      - epimodel             job-2026-11-11-26c4: verified@L3  -> policy:alternate_example  ran=Rscript -e 'testthat::test_local()' [repo_example]
+      - epidemics            job-2026-11-11-04a7: escalated@L2 MISSING_DEPENDENCY -> builder  ran=Rscript -e 'testthat::test_local()' [repo_example]
+      - covid-sim            job-2026-11-11-bb32: escalated@L2 UNKNOWN -> builder  ran=python3 data/run_sample.py United_Kingdom --outputdir /outputs [agent]
+      - covid19model         job-2026-11-11-c21f: failed@L0 UNKNOWN -> builder  ran=? [none]

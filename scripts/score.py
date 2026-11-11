@@ -147,6 +147,10 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
              "llm_fallbacks": sum(1 for a in rows if a.get("classified_by") == "llm"),
              "step_attributed": sum(1 for a in rows if a.get("failed_rung") == "L0" and a.get("failed_step_index") is not None),
              "l0_failures": sum(1 for a in rows if a.get("failed_rung") == "L0")}
+        # A hold-out trial is a statement about one pinned commit. A checkout that
+        # lost its .git (or files) is a different tree: neither success nor
+        # failure, void. (aks-holdout-6b: c302 ran on a damaged checkout.)
+        t["source_mismatch"] = bool(g.get("sha")) and v.get("code_revision") != g["sha"]
         if g.get("buildable"):
             ok = v.get("status") == "verified"
             t["honesty"] = honesty(v, rows) if ok else []
@@ -182,6 +186,8 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
             t["attribution"] = None
         trials.append(t)
 
+    void = [t for t in trials if t["source_mismatch"]]
+    trials = [t for t in trials if not t["source_mismatch"]]
     b = [t for t in trials if t["buildable"]]
     n_ok = sum(1 for t in b if t["success"])
     false_verified = [t for t in trials if t["honesty"]]
@@ -195,6 +201,7 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
     total_l0 = sum(t["l0_failures"] for t in trials)
     return {
         "run_id": run_id, "trials": len(trials), "buildable_trials": len(b),
+        "void_source_mismatch": [f"{t['model']} ({t['job_id']}, {t['status']})" for t in void],
         "build_success": (n_ok / len(b)) if b else None,
         "build_success_ci95": _wilson(n_ok, len(b)) if b else None,
         "verdict_correctness": (sum(1 for t in trials if t["correct"]) / len(trials)) if trials else None,
@@ -259,6 +266,8 @@ def main(argv=None) -> int:
     print(f"  succeeded after correcting the annotation: {res['corrected_annotation_and_succeeded']}")
     print(f"  verified on a test suite only (not counted): {res['verified_tests_only']}")
     print(f"  verified on a usage banner only (not counted): {res['verified_weak']}")
+    if res["void_source_mismatch"]:
+        print(f"  VOID, source is not the pinned commit (not a trial): {', '.join(res['void_source_mismatch'])}")
     print(f"  of the successes, started from memory:       {res['success_from_memory']}")
     print(f"  of the successes, on an alternate shipped example: {res['success_on_alternate_example']}")
     print("\n  failure attribution (buildable, non-success):")

@@ -83,6 +83,11 @@ class Client:
         self.api_server = api_server.rstrip("/")
         self.namespace = namespace
         self.token = token
+        # Set only on the in-cluster path. A projected ServiceAccount token
+        # expires (1 h by default) and the kubelet rewrites the file; a process
+        # that read it once gets 401 on a long L3 wait (hold-out 6b: viva-munk's
+        # 2400 s run ended as `error`, not TIMEOUT). api() re-reads it per call.
+        self.token_path: Path | None = None
         self.workdir = Path(workdir)
         self._tmp: list[Path] = []
 
@@ -117,9 +122,11 @@ class Client:
                     ns = (_SA_DIR / "namespace").read_text(encoding="utf-8").strip()
                 except OSError:
                     ns = "default"
-            return cls(api_server or _IN_CLUSTER_API, ns,
-                       token=(_SA_DIR / "token").read_text(encoding="utf-8").strip(),
-                       ca_pem=(_SA_DIR / "ca.crt").read_text(encoding="utf-8"), workdir=workdir)
+            c = cls(api_server or _IN_CLUSTER_API, ns,
+                    token=(_SA_DIR / "token").read_text(encoding="utf-8").strip(),
+                    ca_pem=(_SA_DIR / "ca.crt").read_text(encoding="utf-8"), workdir=workdir)
+            c.token_path = _SA_DIR / "token"
+            return c
 
         if kubeconfig:
             return cls._from_kubeconfig(kubeconfig, namespace, workdir)
@@ -186,6 +193,11 @@ class Client:
         the offline suite stub the whole cluster with one assignment."""
         url = f"{self.api_server}{path}"
         headers = {"Accept": "application/json", "User-Agent": "envbuild/0"}
+        if self.token_path:
+            try:
+                self.token = self.token_path.read_text(encoding="utf-8").strip() or self.token
+            except OSError:
+                pass                      # keep the last good token; the call will say 401 if it is dead
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         data = None
@@ -283,6 +295,12 @@ class Client:
                     # empty log is otherwise indistinguishable from "ran fine"
                     # (hold-out 4: c302's L3 row had exit None and no text).
                     note = "" if code == 0 else f"ENVBUILD_EXIT: container exited {code} ({term.get('reason') or 'Error'})"
+                    # A StartError's cause (`exec: "python3": executable file not
+                    # found in $PATH`) exists only in the kubelet's message; without
+                    # it covid-sim spent three attempts on "no output was captured".
+                    msg = " ".join(str(term.get("message") or "").split())[:400]
+                    if note and msg:
+                        note += f": {msg}"
                     return code, note
                 waiting = state.get("waiting") or {}
                 if waiting.get("reason") in _FATAL_WAITING:

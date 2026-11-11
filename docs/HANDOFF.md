@@ -3,20 +3,22 @@
 Read this first in a new session. It is the list of what is pending, what is open, and how a pass is run — so the
 work continues from the records rather than from memory. `STATE.md` is the narrative; this is the checklist.
 
-> **Update 11 Nov 2026.** Tree is now **rev 4.15** (198 checks; see the rev 4.15 section of `envagent_changes.md`):
-> a local `init` dry run over the pinned hold-out sources found the rev 4.14 chooser picking non-examples (H28/H29,
-> one a would-be false-verified); O2 and O5 are fixed in the tree. Image `rev4.15` is **built locally and hash-probed
-> (28 files match, pi 1.0.4, `azure gpt-5.6-luna` listed) but not pushed**; the tree is **not committed**. Steps 1–2
-> below become: commit, `docker push mismplatform/pi-envagent:rev4.15`, note the digest. The pre-registered 8–10/19
-> should be re-registered at **6–7/19**: four repos document only a test suite. The AKS kubeconfig is
-> `~/.kube/mism-test.yaml` (Windows home), context `mism-test`.
+> **Update 11 Nov 2026 (evening).** `aks-holdout-6b` is done on `rev4.16`: **3/17, 2 void, 0 false-verified**
+> (`pass_aks-holdout-6b_report.md`). Tree is **rev 4.17** (200 checks; token re-read, StartError message, H30 repo
+> binding, scorer void rule) — **not in an image**; next tag `rev4.17`. Resume list, in order:
+> 1. Restore `bench-biosimulators_tellurium` and `bench-c302` on `irods-pvc` at the manifest shas (both lost files
+>    between 8 Oct and 11 Nov; cause unknown) and re-run those two on `rev4.16` to complete the pass.
+> 2. Build transitive git sources (a git dependency's own `[tool.uv.sources]`): viva-cpm, viva-artistoo, viva-yalla,
+>    viva-amici all stop there. Single-repo reruns, then `aks-holdout-7`.
+> 3. Open decision: do README code blocks / R vignettes count as the repo's example (starsim, epidemics, epimodel)?
+> The AKS kubeconfig is passed with `KUBECONFIG=`; never copy or print it. Steps 1–4 below are historical.
 
 ## 1. Immediate next steps, in order
 
 1. **Commit the tree** (rev 4.14; this handoff is part of it). Suggested message in `docs/COMMIT_MESSAGE.txt`.
 2. **Build `rev4.15`** from the tree (`harness/Dockerfile`, pi pinned via `ARG PI_VERSION=1.0.4`), push, note the digest.
    Rule: **one tag = one tree**; never retag a tree that already has a tag.
-3. **Pre-launch gate** (never skip): suite passes; **canary: one full Job on `bench:mbmm` (run id `gate-<tag>`) reaches `verified`** (the 11 Nov launch skipped a real build and lost a pass to `--kaniko-dir`); in-cluster probe pod hashes 14 files under `/opt/skills/envbuild`
+3. **Pre-launch gate** (never skip): suite passes; **source integrity: each hold-out checkout's `git rev-parse HEAD` equals the manifest sha and its file count matches a fresh clone** (pass 6b ran c302 on a tree missing its package); **canary: one full Job on `bench:mbmm` (run id `gate-<tag>`) reaches `verified`** (the 11 Nov launch skipped a real build and lost a pass to `--kaniko-dir`); in-cluster probe pod hashes 14 files under `/opt/skills/envbuild`
    + `harness/entrypoint.sh` against the tree; `pi --version`; with dummy `AZURE_OPENAI_API_KEY`/`AZURE_OPENAI_BASE_URL`,
    `pi --list-models` lists `azure gpt-5.6-luna`; server-side dry run of one Job manifest.
 4. **Run `aks-holdout-6`**: the same 20 repos (`bench/holdout_manifest.yaml`, pinned shas), `viva-tumor-tcell` first,

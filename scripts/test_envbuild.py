@@ -744,6 +744,22 @@ def _i_auth_order():
         c = k8s.Client.resolve()
         assert c.token == "sa-token" and c.namespace == "from-sa"
         assert c.api_server == "https://kubernetes.default.svc"
+
+        # The kubelet rotates the projected token; a long wait must send the
+        # new one, not the one read at start (hold-out 6b: viva-munk, 401).
+        (sa / "token").write_text("rotated")
+        seen = {}
+        def fake_open(req, **kw):
+            seen["auth"] = req.get_header("Authorization")
+            raise OSError("stop here")
+        saved_open, k8s.urllib.request.urlopen = k8s.urllib.request.urlopen, fake_open
+        try:
+            c.api("GET", "/version")
+        except Exception:
+            pass
+        finally:
+            k8s.urllib.request.urlopen = saved_open
+        assert seen.get("auth") == "Bearer rotated", seen
     finally:
         k8s._SA_DIR = saved
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2358,6 +2374,14 @@ def _k_exit_evidence():
             return {"status": {"phase": "Failed", "containerStatuses": [{"name": "main", "state": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}}}]}}
     code, note = k8s.Client.wait_terminated(C(), "p", "main", deadline=time.monotonic() + 5)
     assert code == 137 and "OOMKilled" in note and "ENVBUILD_EXIT" in note, (code, note)
+    # The kubelet's message is the only place a StartError names its cause.
+    class S:
+        def get_pod(self, name):
+            return {"status": {"containerStatuses": [{"name": "main", "state": {"terminated": {
+                "exitCode": 128, "reason": "StartError",
+                "message": 'failed to create containerd task: exec: "python3": executable file not found in $PATH'}}}]}}
+    code, note = k8s.Client.wait_terminated(S(), "p", "main", deadline=time.monotonic() + 5)
+    assert code == 128 and "StartError" in note and "executable file not found" in note, (code, note)
 
 @check("ladder H12c: pytest in installed mode runs with --import-mode=importlib so the source tree does not shadow the package again (viva-biofilm L3)")
 def _l_pytest_importlib():
@@ -2406,6 +2430,34 @@ def _d_entry_tier():
     assert driver.entry_tier("python demo/demo_report.py", "annotation") == "headline"
     assert driver.entry_tier("python studies/tumor-microenvironment/sims/run.py", "annotation") == "headline"
     assert driver.entry_tier("", None) == "none"
+
+@check("driver H30: init refuses a --repo that is not the Job's MODEL_REPO (voided hold-out 6: the agent built another model's directory under bench:biosimulators_tellurium)")
+def _d_init_repo_binding():
+    import types as _ty
+    root, other = _repo({"run.py": "print(1)\n"}), _repo({"run.py": "print(2)\n"})
+    saved = os.environ.get("MODEL_REPO")
+    os.environ["MODEL_REPO"] = str(root)
+    try:
+        args = _ty.SimpleNamespace(repo=str(other), annotation=None, model_id="bench:m", job_id="job-h30", no_memory=True)
+        try:
+            driver.cmd_init(args, driver.load_config(None))
+        except SystemExit as e:
+            assert e.code == 2, e.code
+        else:
+            raise AssertionError("init accepted a repo other than MODEL_REPO")
+    finally:
+        os.environ.pop("MODEL_REPO", None) if saved is None else os.environ.__setitem__("MODEL_REPO", saved)
+
+@check("score: a verdict on a tree that is not the pinned commit is void -- neither a success nor a trial (hold-out 6b: c302 verified on a checkout missing its package)")
+def _s_source_mismatch():
+    import score as _score
+    gt = {"models": {"m": {"buildable": True, "example": "python run.py", "sha": "abc"}}}
+    v = {"model_id": "bench:m", "job_id": "j", "status": "verified", "ladder_reached": "L3", "entrypoint_used": "python run.py",
+         "entrypoint_tier": "headline", "lockfile_sha256": "sha256:x", "image_digest": "sha256:y", "code_revision": "unknown"}
+    res = _score.score([], [v], gt, None)
+    assert res["buildable_trials"] == 0 and res["void_source_mismatch"], res
+    res = _score.score([], [dict(v, code_revision="abc")], gt, None)
+    assert res["buildable_trials"] == 1 and not res["void_source_mismatch"], res
 
 # ---------------------------------------------------------------- sprint before hold-out 6
 

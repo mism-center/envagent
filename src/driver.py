@@ -552,6 +552,14 @@ def choose_entry(ann: dict, ev: dict, findings: list[dict]) -> tuple[str, str, d
 
 def cmd_init(args, cfg) -> None:
     repo = str(Path(args.repo).resolve())
+    # H30: the Job names its repo in MODEL_REPO. When that checkout was missing,
+    # the agent ran `init` on a *different* model's directory under the requested
+    # model id (voided aks-holdout-6, biosimulators_tellurium) -- a verdict about
+    # the wrong code. Judgement cannot be trusted with this; refuse it here.
+    want = os.environ.get("MODEL_REPO")
+    if want and str(Path(want).resolve()) != repo:
+        die(f"--repo {repo} is not this job's MODEL_REPO ({want}); a job builds the repo it was "
+            f"launched for and nothing else. If MODEL_REPO is missing, stop and report it.")
     if not Path(repo).is_dir():
         die(f"--repo is not a directory: {repo}")
     if args.model_id and not _MODEL_ID.match(args.model_id):

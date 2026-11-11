@@ -3,6 +3,12 @@
 *For the team. Every number is read from the saved `score_*.txt` files and the attempt/verdict records
 (`attempts_<run>.jsonl`, `verdicts_<run>.jsonl`); the per-pass reports in this directory carry the per-model detail.*
 
+> **Update 11 Nov 2026.** Hold-out pass 6 (`aks-holdout-6b`, `rev4.16`): **3/17, 2 void, 0 false-verified** — below the
+> 4/19 of passes 4–5. viva-mgen is new; viva-simbio and viva-amici dropped out because the git-sourced
+> `vivarium-workbench` they declare does not install with pip (passes 4–5 had installed the same-named PyPI package).
+> Two checkouts on the models claim lost files. Tree is rev 4.17, 200 checks. Details: `pass_aks-holdout-6b_report.md`.
+> The text below is the 14 Oct state.
+
 ## What envbuild is
 
 An agent that turns a registered model repository into a **verified execution environment**, or says honestly that it
