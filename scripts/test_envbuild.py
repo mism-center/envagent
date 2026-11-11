@@ -2587,13 +2587,15 @@ def _e_optional_groups():
     assert "plotly" in d and "pytest" in d and "pbg-mem3dg" not in d and "cupy" not in d, d
     assert set(ev["python"]["optional_groups_skipped"]) == {"sim", "gpu"}, ev["python"]["optional_groups_skipped"]
 
-@check("builder: Kaniko's working directory is on the work claim (--kaniko-dir), not the container root filesystem")
+@check("builder: no --kaniko-dir (Kaniko deletes /kaniko, where the registry Secret is mounted read-only); a Kaniko usage banner is an infra failure, not the model's")
 def _b_kaniko_dir():
     import builder as _b
     class C: namespace = "ns"
     m = _b.K8sBuilder("job-x", C(), "reg", "pvc", "/work")._pod_manifest("p", "reg/envbuild:t", "/work/context", 600)
     args = m["spec"]["containers"][0]["args"]
-    assert any(a.startswith("--kaniko-dir=/work/kaniko") or a == "--kaniko-dir=" + _b._POD_WORK + "/kaniko" for a in args), args
+    assert not any(a.startswith("--kaniko-dir") for a in args), args
+    c = classify.classify("Error: unlinkat //kaniko/.docker/config.json: read-only file system\nUsage:\n  executor [flags]\n  executor [command]\n", rung="L0")
+    assert c.failure_class == "INFRA_UNAVAILABLE", c
 
 @check("driver: choose_entry prefers a documented script over a test runner when both are repo examples (viva-mgen: README has `pytest` and a study run)")
 def _d_choose_script_over_tests():

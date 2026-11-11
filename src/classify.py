@@ -456,6 +456,13 @@ def _rules():
                     r"ImagePullBackOff|ErrImagePull|"
                     r"UNAUTHORIZED: authentication required|unauthorized: incorrect username"),
          simple("INFRA_UNAVAILABLE")),
+        # Kaniko printing its own usage text means the HARNESS invoked it wrongly
+        # (a bad flag, an unwritable path). No spec change can repair that and
+        # no model should be charged for it: the first aks-holdout-6 launch
+        # closed 20 models as UNKNOWN on a `--kaniko-dir` defect.
+        ("infra_builder_usage",
+         re.compile(r"^Usage:\s*\n\s+executor \[flags\]", re.M),
+         simple("INFRA_UNAVAILABLE")),
         ("infra_scheduling",
          re.compile(r"FailedScheduling|Unschedulable|Insufficient (?:cpu|memory)|"
                     r"The node was low on resource|Evicted|"

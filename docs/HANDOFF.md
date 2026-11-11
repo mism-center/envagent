@@ -16,7 +16,7 @@ work continues from the records rather than from memory. `STATE.md` is the narra
 1. **Commit the tree** (rev 4.14; this handoff is part of it). Suggested message in `docs/COMMIT_MESSAGE.txt`.
 2. **Build `rev4.15`** from the tree (`harness/Dockerfile`, pi pinned via `ARG PI_VERSION=1.0.4`), push, note the digest.
    Rule: **one tag = one tree**; never retag a tree that already has a tag.
-3. **Pre-launch gate** (never skip): suite passes; in-cluster probe pod hashes 14 files under `/opt/skills/envbuild`
+3. **Pre-launch gate** (never skip): suite passes; **canary: one full Job on `bench:mbmm` (run id `gate-<tag>`) reaches `verified`** (the 11 Nov launch skipped a real build and lost a pass to `--kaniko-dir`); in-cluster probe pod hashes 14 files under `/opt/skills/envbuild`
    + `harness/entrypoint.sh` against the tree; `pi --version`; with dummy `AZURE_OPENAI_API_KEY`/`AZURE_OPENAI_BASE_URL`,
    `pi --list-models` lists `azure gpt-5.6-luna`; server-side dry run of one Job manifest.
 4. **Run `aks-holdout-6`**: the same 20 repos (`bench/holdout_manifest.yaml`, pinned shas), `viva-tumor-tcell` first,

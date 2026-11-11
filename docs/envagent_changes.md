@@ -626,3 +626,20 @@ script — only a test suite — so under the 7 Oct policy their best possible o
 The honest ceiling for pass 6 is the four stable repos + viva-mgen + viva-membrane-actin + c302 + covasim-class repeats,
 i.e. about 6–7/19, not 8–10. Raising it needs a new mechanism (README code blocks / R vignettes as the example), which
 is a policy decision.
+
+# rev 4.16 — the first `aks-holdout-6` launch is void (2026-11-11; 198 checks)
+
+`aks-holdout-6` on `rev4.15@sha256:e1441cd0…` ran all 20 Jobs in 28 minutes: **0/19, 38 attempt rows, every one
+`UNKNOWN` at L0**, 19 `escalated` + 1 `failed`, 0 false-verified. Kaniko exited before step 1 on every build:
+`Error: unlinkat //kaniko/.docker/config.json: read-only file system`. The rows stay on the claim under that run id as
+the record of a harness defect; they measure nothing about the models. The re-run is `aks-holdout-6b`.
+
+- **Cause** `--kaniko-dir` (rev 4.14, never in an image until rev4.15): Kaniko copies `/kaniko` to the new directory
+  and deletes the original, where the registry Secret is mounted read-only. Removed from `src/builder.py`; it would
+  also have copied the push credential onto the shared work claim.
+- **`infra_builder_usage`** (`src/classify.py`): a Kaniko usage banner is `INFRA_UNAVAILABLE` — uncharged, not
+  repairable by a spec change, and never a model verdict.
+- **Gate gap.** The pre-launch gate hashed files and listed models but never built anything. It now includes a canary:
+  one full Job on a tuning-corpus model (`bench:mbmm`, run id `gate-<tag>`) must reach `verified` before a pass starts.
+- Before the launch, `records/memory/bench_viva-mgen.json` (rerun-6, command `pytest`) was moved to
+  `records/memory-archive/` so viva-mgen is measured by search like the other nineteen.

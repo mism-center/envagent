@@ -266,14 +266,15 @@ class K8sBuilder:
             f"--context=dir://{context}",
             f"--destination={name}",
             f"--digest-file={_POD_WORK}/digest.txt",
-            # Kaniko's own working directory (layer tarballs it snapshots, the
-            # local cache) goes on the work claim, not the container's root
-            # filesystem: that roughly halves ephemeral-storage use. The
-            # extracted image filesystem itself still lives at `/` and counts
-            # as ephemeral -- Kaniko cannot redirect that; a namespace whose
+            # No `--kaniko-dir`. Kaniko implements it by COPYING /kaniko to the
+            # new directory and deleting the original: the registry Secret is
+            # mounted read-only at /kaniko/.docker, so the delete fails
+            # (`unlinkat //kaniko/.docker/config.json: read-only file system`)
+            # and every build dies before step 1 -- all 20 Jobs of the first
+            # aks-holdout-6 launch. Had it worked it would also have copied
+            # the push credential onto the shared work claim. A namespace whose
             # ephemeral quota is below the unpacked image needs a volume-backed
-            # builder (BuildKit rootless), not a bigger number here.
-            f"--kaniko-dir={_POD_WORK}/kaniko",
+            # builder (BuildKit rootless), not this flag.
         ]
         if self.cache_repo:
             args += ["--cache=true", f"--cache-repo={self.cache_repo}", "--cache-copy-layers=false"]
