@@ -3,11 +3,12 @@
 Read this first in a new session. It is the list of what is pending, what is open, and how a pass is run — so the
 work continues from the records rather than from memory. `STATE.md` is the narrative; this is the checklist.
 
-> **Update 11 Nov 2026 (evening).** `aks-holdout-6b` is done on `rev4.16`: **3/17, 2 void, 0 false-verified**
+> **Update 12 Nov 2026.** `aks-holdout-6b` is done on `rev4.16`: **4/19, 0 false-verified**
 > (`pass_aks-holdout-6b_report.md`). Tree is **rev 4.17** (200 checks; token re-read, StartError message, H30 repo
 > binding, scorer void rule) — **not in an image**; next tag `rev4.17`. Resume list, in order:
-> 1. Restore `bench-biosimulators_tellurium` and `bench-c302` on `irods-pvc` at the manifest shas (both lost files
->    between 8 Oct and 11 Nov; cause unknown) and re-run those two on `rev4.16` to complete the pass.
+> 1. Benchmark sources are on the **`envbuild-bench-models`** claim now (not `irods-pvc`): launch Jobs with
+>    `__MODELS_PVC__=envbuild-bench-models`; reload with `scripts/load_bench_models.sh`. Open: gate reads
+>    `/_integrity/*.sha256`; back up viva-yalla (no upstream); memory must refuse a verdict with unknown revision.
 > 2. Build transitive git sources (a git dependency's own `[tool.uv.sources]`): viva-cpm, viva-artistoo, viva-yalla,
 >    viva-amici all stop there. Single-repo reruns, then `aks-holdout-7`.
 > 3. Open decision: do README code blocks / R vignettes count as the repo's example (starsim, epidemics, epimodel)?

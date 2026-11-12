@@ -646,8 +646,9 @@ the record of a harness defect; they measure nothing about the models. The re-ru
 
 # rev 4.17 — hold-out pass `aks-holdout-6b` and what it exposed (2026-11-11; 200 checks)
 
-`aks-holdout-6b` on `rev4.16`: **3/17 = 17.6 %**, 2 void trials, 1 `verified_tests`, **0 false-verified**
-(pre-registered 6–7/19). Report: `pass_aks-holdout-6b_report.md`. The count fell from 4/19 because rev 4.14 (M1)
+`aks-holdout-6b` on `rev4.16`: **4/19 = 21.1 %**, 1 `verified_tests`, **0 false-verified** (pre-registered 6–7/19).
+First scored 3/17 with two void trials (c302, biosimulators_tellurium: checkouts damaged on `irods-pvc`); both were
+re-run on 12 Nov from the new claim, and c302 verified on its README example for the first time. Report: `pass_aks-holdout-6b_report.md`. The count fell from 4/19 because rev 4.14 (M1)
 follows the git source seven viva repos declare for `vivarium-workbench`, and that source — `main` and the locked
 commits alike — is not pip-installable (its own dependencies are git-sourced; one commit needs an npm bundle).
 Passes 4–5 had installed the same-named PyPI package instead.
@@ -665,6 +666,9 @@ Harness fixes made after the pass (not in an image yet; next tag `rev4.17`):
   decision to leave to judgement.
 - **Void trials** (`scripts/score.py`): a verdict whose `code_revision` differs from the ground truth's `sha` is not a
   trial. c302 `verified` on a checkout that had lost `.git` and its package.
+- **Benchmark claim** (`deploy/envbuild.yaml`, `scripts/load_bench_models.sh`): hold-out and corpus checkouts moved
+  to a dedicated `envbuild-bench-models` claim, loaded at the manifest shas with a sha256 list per checkout. The
+  platform's `irods-pvc` lost two of them in an infra reset.
 - **Gate**: source integrity — every hold-out checkout's `git rev-parse HEAD` equals the manifest sha and the tree is
   clean, before the canary.
 

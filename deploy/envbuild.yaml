@@ -85,6 +85,24 @@ spec:
     requests:
       storage: 50Gi
 ---
+# Benchmark sources only: the hold-out and tuning-corpus checkouts, laid out
+# bench-<name>/1.0/ at the shas in bench/holdout_manifest.yaml, loaded by
+# scripts/load_bench_models.sh. Separate from `irods-pvc` because that claim
+# belongs to the platform and an infra reset there silently removed two
+# checkouts (hold-out 6b: c302 lost its package, tellurium was gone).
+# Jobs mount it read-only via __MODELS_PVC__; only the loader pod writes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: envbuild-bench-models
+  namespace: default
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: azurefile-csi
+  resources:
+    requests:
+      storage: 10Gi
+---
 # This is how `--network none` survives the move off docker. An empty Ingress and
 # Egress rule set denies everything, including DNS, for any pod carrying the
 # label -- which K8sVerifier applies to every run with `network=False`.

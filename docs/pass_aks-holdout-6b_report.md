@@ -7,20 +7,24 @@ Scored with `scripts/score.py --run-id aks-holdout-6b` (scorer updated after the
 is not the pinned commit is void). Raw rows: `docs/records/{attempts,verdicts}_aks-holdout-6b.jsonl`; per-model
 sort: `pass_aks-holdout-6b_sorted.csv`.
 
+**Completed 12 Nov.** The two models whose checkouts were damaged on `irods-pvc` (c302, biosimulators_tellurium) were
+re-run on the same image from a new dedicated claim, `envbuild-bench-models`, loaded at the manifest shas
+(`scripts/load_bench_models.sh`). The figures below include them.
+
 The first launch, `aks-holdout-6` on `rev4.15`, is void (Kaniko `--kaniko-dir`; see the change log).
 
 ## Headline
 
 | metric | p4 | p5 | **p6b** |
 |---|---|---|---|
-| build success | 4/19 | 4/19 | **3/17 = 17.6 %** (CI 6–41 %) |
-| void trials (source not the pinned commit) | 0 | 0 | **2** (c302, biosimulators_tellurium) |
+| build success | 4/19 | 4/19 | **4/19 = 21.1 %** (CI 8–43 %) |
+| void trials (source not the pinned commit), re-run | 0 | 0 | **2** (c302, biosimulators_tellurium) |
 | verified on a test suite only (not counted) | 0 | 1 | **1** (epimodel) |
 | false-verified | 0 | 0 | **0** |
 | `error` verdicts | 1 | 0 | **1** (viva-munk) |
-| LLM-fallback share | 38.3 % | 40.3 % | **51.9 %** |
+| LLM-fallback share | 38.3 % | 40.3 % | **50.0 %** |
 
-**Pre-registered 6–7/19; measured 3/17. The pass missed, and the harness is not the main reason.** Three things
+**Pre-registered 6–7/19; measured 4/19 — the same count as passes 4–5, with a different set (viva-mgen and c302 in, viva-simbio and viva-amici out). The pass missed, and the harness is not the main reason.** Three things
 decided it:
 
 1. **One git-sourced dependency is not pip-installable.** Seven viva repos declare `vivarium-workbench` from git —
@@ -36,7 +40,8 @@ decided it:
    viva-tumor-tcell and viva-mgen still verify with the bare name from PyPI (their manifests declare it that way).
 3. **The models claim lost source files between 8 Oct and 11 Nov.** `bench-biosimulators_tellurium` is gone;
    `bench-c302` lost `.git`, the `c302/` package, `cells/` and 61 example files (458 of 2017). Nothing in the harness
-   noticed. c302's `verified` verdict is on that damaged tree and is struck as void.
+   noticed. c302's first `verified` verdict is on that damaged tree and is struck as void; both models were re-run
+   from the new claim.
 
 ## Successes, audited by hand
 
@@ -45,10 +50,11 @@ decided it:
 | viva-tumor-tcell | `python studies/tumor-microenvironment/sims/run.py` (annotation) | writable copy, `SET_L3_TIMEOUT 1200` | ran 937 s, wrote results + figures. Genuine. |
 | viva-mgen | `python workspace/studies/fig2-growth/sims/run.py` (README) | writable copy | **new**: the documented study run, not `pytest` as in rerun-6. Wrote study outputs. Genuine. `viva-parsimony` comes from unpinned `main`. |
 | covasim | `python examples/simple.py` (= ground truth) | `REMOVE_PKG distutils` | ran clean, prints only (`l3_claim`: no declared outputs). Genuine. |
+| c302 | `python c302/c302_Pharyngeal.py B` (README = ground truth) | `extra_path=/model` | **new, first time ever**: wrote the NeuroML/LEMS files, at the pinned sha. The re-run started from the memory entry the void run had left, so it was repeated with that entry archived (`aks-holdout-6b-c302-search`): verified again from the evidence draft in 3 attempts (Python 3.10, writable copy). Genuine, and by search. |
 
 Not counted:
 
-- **c302 — void.** `verified` on `python examples/parametersweep/GenerateExamples.py`, `code_revision: unknown`. On the
+- **c302, first run — void.** `verified` on `python examples/parametersweep/GenerateExamples.py`, `code_revision: unknown`. On the
   intact pinned tree `init` chooses the README's `python c302/c302_Pharyngeal.py B`; the script that ran does not
   import the package the checkout was missing. Counting it would have been an easy win.
 - **epimodel — `verified_tests`.** First time it verifies at all (`testthat::test_local()`, 516 s). Policy: a test
@@ -72,10 +78,10 @@ Not counted:
 | starsim | L3, pytest collection | **harness bug** | the L1 probe still imports module-less `mkl` / `intel-cmplr-lib-rt` (H24 passes offline, not live) — two attempts lost; `gitpython` needs the `git` binary (rule-table entry). Tests tier in any case. |
 | covid19model | L0 | **harness bug** | micromamba base runs the apt layer as non-root; then a `python=3.14` conda pin conflicts with `r-base`. No entry point either (conda-style R names: design item). |
 | catalyst-jl (control) | `failed`, expected `escalated` | **harness bug** | O10 is no longer cosmetic: the non-Julia L1 probe on `julia:1.10` is a `StartError`, and the verdict came out `failed`. |
-| c302 | void | **harness bug** (source integrity) | restore the checkout; gate must check sources against the manifest |
-| biosimulators_tellurium | no trial | **harness bug** (source integrity) | restore the checkout. In the voided first launch the agent ran this model id against *another model's directory* (`/models/cbea98f1-…`); `init` now refuses that (H30). |
+| biosimulators_tellurium | L1 on re-run, `tellurium` 2.2.10 imports `tesbml` | repo defect | upstream (O7), unchanged since pass 2; tests tier in any case. Its first trial did not exist: the checkout was gone, and in the voided first launch the agent ran this model id against *another model's directory* (`/models/cbea98f1-…`); `init` now refuses that (H30). |
 
-Counts: new mechanism 5 · repo defect 4 (2 are design items) · harness bug 5 + 2 void · policy 1.
+Counts: new mechanism 5 · repo defect 5 (2 are design items) · harness bug 5 (incl. the control) · policy 1. The two
+source-integrity losses were a sixth harness fault, repaired by the new claim.
 
 ## What the pass says
 
@@ -102,7 +108,8 @@ user, the Julia probe, live H24.
 
 ## Before the next pass
 
-1. Restore `bench-biosimulators_tellurium` and `bench-c302` on `irods-pvc` at the manifest shas (a write to the
-   shared models claim — needs a go-ahead) and find out what removed them.
-2. Re-run those two on `rev4.16` to complete this pass's table (same tree, so it is still one pass).
+1. Done: benchmark sources live on `envbuild-bench-models` (27 checkouts, sha256 lists under `/_integrity/`).
+   Launch with `__MODELS_PVC__=envbuild-bench-models`. Still open: the gate should read those lists; viva-yalla has
+   no upstream any more and needs a backup copy.
+2. A void run can leave a memory entry (c302 did). Memory should refuse a verdict whose `code_revision` is `unknown`.
 3. Build the transitive-git-source mechanism, re-run the four repos it targets singly, then `aks-holdout-7`.

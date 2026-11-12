@@ -1,17 +1,17 @@
-run: aks-holdout-6b   trials: 18   buildable trials: 17
+run: aks-holdout-6b   trials: 20   buildable trials: 19
 
-  build success         17.6 %   (95% CI 6-41 %)
-  verdict correctness   16.7 %
+  build success         21.1 %   (95% CI 8-43 %)
+  verdict correctness   20.0 %
   false-verified       0
-  succeeded after correcting the annotation: 3
+  succeeded after correcting the annotation: 4
   verified on a test suite only (not counted): 1
   verified on a usage banner only (not counted): 0
   VOID, source is not the pinned commit (not a trial): c302 (job-2026-11-11-d82a, verified)
-  of the successes, started from memory:       0
+  of the successes, started from memory:       1
   of the successes, on an alternate shipped example: 0
 
   failure attribution (buildable, non-success):
-    builder        10
+    builder        11
     infra          1
     annotation     1
     unattributed   1
@@ -19,10 +19,12 @@ run: aks-holdout-6b   trials: 18   buildable trials: 17
 
   median charged attempts   3
   infra retries (uncharged) 0
-  LLM-fallback share         51.9 %
+  LLM-fallback share         50.0 %
   failed_step_index cover.  100.0 %
 
   per model:
+    biosimulators_tellurium buildable              trials=1 success=0 correct=0
+    c302                   buildable              trials=1 success=1 correct=1
     catalyst-jl            control (escalated)    trials=1 success=0 correct=0
     covasim                buildable              trials=1 success=1 correct=1
     covid-sim              buildable              trials=1 success=0 correct=0
@@ -55,3 +57,4 @@ run: aks-holdout-6b   trials: 18   buildable trials: 17
       - epidemics            job-2026-11-11-04a7: escalated@L2 MISSING_DEPENDENCY -> builder  ran=Rscript -e 'testthat::test_local()' [repo_example]
       - covid-sim            job-2026-11-11-bb32: escalated@L2 UNKNOWN -> builder  ran=python3 data/run_sample.py United_Kingdom --outputdir /outputs [agent]
       - covid19model         job-2026-11-11-c21f: failed@L0 UNKNOWN -> builder  ran=? [none]
+      - biosimulators_tellurium job-2026-11-12-698b: escalated@L0 UNSUPPORTED_TOOLCHAIN -> builder  ran=pytest [repo_example]
