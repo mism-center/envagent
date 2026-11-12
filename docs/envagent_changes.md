@@ -672,8 +672,15 @@ Harness fixes made after the pass (not in an image yet; next tag `rev4.17`):
 - **Gate**: source integrity — every hold-out checkout's `git rev-parse HEAD` equals the manifest sha and the tree is
   clean, before the canary.
 
-Observed, not yet acted on (one observation each, or a design decision): transitive git sources of a git dependency
-(four repos — the next mechanism); R `Remotes:`; `cannot import name` from a lock-pinned package → unpin to the
+- **M7, transitive git sources** (`src/driver.py` `transitive_git_sources`, `src/evidence.py` lock graph; 201 checks):
+  the git sources a git dependency itself needs are appended to the draft as direct references. Read from the
+  model's lockfile first (every git package reachable from a direct git dependency, at the locked sha), else from the
+  dependency's own `pyproject.toml` at its ref (`[tool.uv.sources]` entries it lists in `project.dependencies`,
+  recursively, GitHub raw only, at most 24 fetches). This is what `uv` does and pip does not. `pkg_origin` records
+  `git:<ref> (needed by <parent>)`; a branch ref is listed under `vcs_unpinned`. `init` now makes outbound requests
+  to GitHub for repos with git dependencies and no lockfile; a failed fetch adds nothing.
+
+Observed, not yet acted on (one observation each, or a design decision): R `Remotes:`; `cannot import name` from a lock-pinned package → unpin to the
 declared range; extras-only git dependencies in the draft; README `make test` with no Makefile; apt on a non-root
 micromamba base; the non-Julia L1 probe on a Julia base (O10 now changes the control's verdict); H24 not effective
 live for `mkl` / `intel-cmplr-lib-rt`; `gitpython` needs the `git` binary; R `dyn.load` missing soname falls to the

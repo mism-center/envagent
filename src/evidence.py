@@ -231,13 +231,16 @@ def _parse_lockfile(root: Path) -> dict | None:
             src = p.get("source") or {}
             if isinstance(src, dict) and src:
                 kind = next(iter(src)); sources[_norm_name(p["name"])] = f"{kind}:{src[kind]}"
-        return versions, sources
+        # Who needs whom, for the git closure (driver.transitive_git_sources).
+        graph = {_norm_name(p["name"]): sorted({_norm_name(d["name"]) for d in p.get("dependencies") or []
+                                                 if isinstance(d, dict) and d.get("name")}) for p in pk}
+        return versions, sources, graph
 
     for name in ("uv.lock", "poetry.lock"):
         if (root / name).exists():
             v = toml_packages(root / name)
             if v and v[0]:
-                return {"kind": name.split(".")[0], "file": name, "versions": v[0], "sources": v[1]}
+                return {"kind": name.split(".")[0], "file": name, "versions": v[0], "sources": v[1], "graph": v[2]}
     if (root / "Pipfile.lock").exists():
         try:
             data = json.loads(full(root / "Pipfile.lock"))

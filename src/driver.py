@@ -44,6 +44,8 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
+import urllib.request
 import uuid
 
 import yaml
@@ -314,6 +316,76 @@ def git_direct_ref(name: str, source: str | None) -> str | None:
     return f"git+{url}" + (f"@{ref}" if ref else "")
 
 
+def _fetch_pyproject(ref: str) -> str:
+    """`git+https://github.com/org/repo@ref` -> that ref's pyproject.toml text, "" on any failure.
+    ponytail: GitHub raw only; other hosts need a shallow clone, add when a repo needs one."""
+    m = re.match(r"git\+https://github\.com/([\w.\-]+)/([\w.\-]+?)(?:\.git)?(?:@([\w./\-]+))?$", ref)
+    if not m:
+        return ""
+    url = f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/{m.group(3) or 'HEAD'}/pyproject.toml"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "envbuild/0"}), timeout=20) as r:
+            return r.read(400_000).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def transitive_git_sources(direct: dict, lock: dict, fetch, max_fetch: int = 24) -> dict:
+    """Git sources a git dependency itself needs: {name: (direct ref, via)}.
+
+    pip follows a dependency's *metadata*; a name whose only source is the
+    dependency's own `[tool.uv.sources]` is invisible to it (hold-out 6b:
+    `vivarium-workbench` needs `viva-basic-processes` / `viva-marketplace`, four
+    repos stopped at L0 on `No matching distribution`). uv applies those sources,
+    which is how the authors' environments resolve. Two grounded places to read
+    them, in order:
+      1. the model's lockfile -- every git package reachable from a direct git
+         dependency, at the sha the author resolved;
+      2. no lock entry: the dependency's pyproject at its ref, recursively --
+         only names it lists in `project.dependencies`, so its dev-only and
+         path sources stay out.
+    Nothing here is guessed: a name with no declared git source is left to pip.
+    """
+    out: dict = {}
+    graph, lsrc = lock.get("graph") or {}, lock.get("sources") or {}
+    queue, seen, fetched = [(n, r, n) for n, r in direct.items()], set(direct), 0
+    while queue:
+        name, ref, via = queue.pop(0)
+        if name in graph:                                   # 1. the lockfile knows this package
+            for child in graph[name]:
+                if child in seen:
+                    continue
+                seen.add(child)
+                cref = git_direct_ref(child, lsrc.get(child)) if str(lsrc.get(child, "")).startswith("git:") else None
+                if cref:
+                    out[child] = (cref, via)
+                queue.append((child, cref or "", child if cref else via))
+            continue
+        if not ref or fetched >= max_fetch:
+            continue
+        fetched += 1                                        # 2. ask the dependency itself
+        try:
+            data = tomllib.loads(fetch(ref) or "")
+        except Exception:
+            continue
+        needs = {_dist_key(patch_mod.req_name(d) or "") for d in (data.get("project") or {}).get("dependencies") or [] if isinstance(d, str)}
+        for k, v in (((data.get("tool") or {}).get("uv") or {}).get("sources") or {}).items():
+            child = _dist_key(k)
+            if child in seen or child not in needs or not (isinstance(v, dict) and v.get("git")):
+                continue
+            r = v.get("rev") or v.get("tag") or v.get("branch")
+            cref = git_direct_ref(child, str(v["git"]) + (f"#{r}" if r else ""))
+            if cref:
+                seen.add(child)
+                out[child] = (cref, name)
+                queue.append((child, cref, child))
+    return out
+
+
+def _dist_key(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -> EnvSpec:
     """A first spec from evidence alone. The agent refines it per specs/synthesis.md.
 
@@ -365,11 +437,26 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
         else:
             rewritten.append(d)
     deps = rewritten
+    # ...and the git sources those dependencies need themselves (see
+    # transitive_git_sources). Appended as direct references of their own: pip
+    # accepts a user-supplied URL for a name a dependency requires bare.
+    draft_spec.vcs_transitive = {}
+    if draft_spec.vcs_installed and choice.pkg_manager == "pip":
+        have = {_dist_key(patch_mod.req_name(d) or "") for d in deps if isinstance(d, str)}
+        for key, (ref, via) in transitive_git_sources(dict(draft_spec.vcs_installed), lock, _fetch_pyproject).items():
+            if key in have:
+                continue
+            deps.append(f"{key} @ {ref}")
+            draft_spec.vcs_installed[key] = ref
+            draft_spec.vcs_transitive[key] = via
+            if not re.fullmatch(r"[0-9a-f]{7,40}", ref.rsplit("@", 1)[-1]):
+                draft_spec.vcs_unpinned.append(key)
     draft_spec.pkg_origin = {}
     for d in deps:
         key = re.sub(r"[-_.]+", "-", patch_mod.req_name(d) or "").lower() if isinstance(d, str) else ""
         if key:
-            draft_spec.pkg_origin[key] = (f"git:{draft_spec.vcs_installed[key]}" if key in draft_spec.vcs_installed
+            draft_spec.pkg_origin[key] = (f"git:{draft_spec.vcs_installed[key]} (needed by {draft_spec.vcs_transitive[key]})" if key in draft_spec.vcs_transitive
+                                          else f"git:{draft_spec.vcs_installed[key]}" if key in draft_spec.vcs_installed
                                           else f"vcs:{vcs[key]}" if key in vcs
                                           else ("annotation" if ann.get("declared_deps") else "declared"))
     if choice.pkg_manager == "pip" and lock.get("versions") and lock.get("usable", True):

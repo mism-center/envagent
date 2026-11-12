@@ -2459,6 +2459,47 @@ def _s_source_mismatch():
     res = _score.score([], [dict(v, code_revision="abc")], gt, None)
     assert res["buildable_trials"] == 1 and not res["void_source_mismatch"], res
 
+@check("driver M7: git sources a git dependency itself needs are added as direct references -- from the lockfile's closure at its shas, else from the dependency's own [tool.uv.sources] (hold-out 6b: vivarium-workbench -> viva-basic-processes / viva-marketplace, four repos at L0)")
+def _d_transitive_git():
+    wb = "git+https://github.com/o/workbench@" + "a" * 40
+    # 1. lockfile closure: git children at their locked sha, through a registry package too; no network
+    lock = {"graph": {"workbench": ["numpy", "basic", "mid"], "mid": ["deep"], "basic": [], "deep": [], "numpy": []},
+            "sources": {"workbench": "git:https://github.com/o/workbench.git?branch=main#" + "a" * 40, "numpy": "registry:https://pypi.org/simple",
+                        "mid": "registry:https://pypi.org/simple",
+                        "basic": "git:https://github.com/o/basic.git?branch=main#" + "b" * 40, "deep": "git:https://github.com/o/deep.git#" + "c" * 40}}
+    def no_net(ref):
+        raise AssertionError("the lockfile answers this; no fetch")
+    got = driver.transitive_git_sources({"workbench": wb}, lock, no_net)
+    assert got == {"basic": ("git+https://github.com/o/basic@" + "b" * 40, "workbench"),
+                   "deep": ("git+https://github.com/o/deep@" + "c" * 40, "workbench")}, got
+    # 2. no lock: the dependency's pyproject, recursively; dev-only and path sources stay out
+    pages = {"git+https://github.com/o/workbench@main": """
+[project]
+dependencies = ["numpy", "viva-basic-processes", "viva_catalog>=1"]
+[tool.uv.sources]
+viva-basic-processes = { git = "https://github.com/o/basic.git", branch = "main" }
+viva-catalog = { git = "https://github.com/o/marketplace.git", rev = "4e72e3b" }
+devtool = { git = "https://github.com/o/devtool.git" }
+sibling = { path = "../sibling" }
+""", "git+https://github.com/o/basic@main": """
+[project]
+dependencies = ["leaf"]
+[tool.uv.sources]
+leaf = { git = "https://github.com/o/leaf.git", tag = "v1" }
+"""}
+    asked = []
+    def fetch(ref):
+        asked.append(ref)
+        return pages.get(ref, "")
+    got = driver.transitive_git_sources({"workbench": "git+https://github.com/o/workbench@main"}, {}, fetch)
+    assert got == {"viva-basic-processes": ("git+https://github.com/o/basic@main", "workbench"),
+                   "viva-catalog": ("git+https://github.com/o/marketplace@4e72e3b", "workbench"),
+                   "leaf": ("git+https://github.com/o/leaf@v1", "viva-basic-processes")}, got
+    assert "devtool" not in got and "sibling" not in got
+    # a fetch that fails or returns junk adds nothing and does not raise
+    assert driver.transitive_git_sources({"x": "git+https://github.com/o/x@main"}, {}, lambda r: "not [toml") == {}
+    assert driver._fetch_pyproject("git+https://gitlab.com/o/x@main") == ""        # ponytail ceiling: GitHub only
+
 # ---------------------------------------------------------------- sprint before hold-out 6
 
 @check("classify: a toolchain's read-only object-file error at L3 is a mount-contract repair -> writable_copy (epidemics: compile_dll `can't create odin.o`)")
