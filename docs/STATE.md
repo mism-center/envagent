@@ -7,6 +7,8 @@
 > passes 4–5 with a different set. viva-mgen and c302 are new; viva-simbio and viva-amici dropped out because the git-sourced
 > `vivarium-workbench` they declare does not install with pip (passes 4–5 had installed the same-named PyPI package).
 > Two checkouts on `irods-pvc` lost files; benchmark sources now live on `envbuild-bench-models`. Tree is rev 4.17, 200 checks. Details: `pass_aks-holdout-6b_report.md`.
+> 12 Nov: rev4.17 adds transitive git sources; in single-repo reruns (`aks-rerun-7`) viva-cpm verified for the first
+> time and the other six workbench repos moved past L0. See `rerun_aks-rerun-7_report.md`.
 > The text below is the 14 Oct state.
 
 ## What envbuild is

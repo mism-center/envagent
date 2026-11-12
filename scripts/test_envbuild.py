@@ -2459,6 +2459,25 @@ def _s_source_mismatch():
     res = _score.score([], [dict(v, code_revision="abc")], gt, None)
     assert res["buildable_trials"] == 1 and not res["void_source_mismatch"], res
 
+@check("rules from aks-rerun-7: rustc's missing linker is the missing compiler; a build hook without npm gets nodejs+npm at L0 only (at L3 it is a Node-runtime model, a design item)")
+def _c_rerun7_rules():
+    c = classify.classify("error: linker `cc` not found\n  = note: No such file or directory (os error 2)", rung="L0")
+    assert (c.failure_class, c.action, c.arg, c.rule) == ("COMPILE_ERROR", "ADD_APT_PKG", "build-essential", "no_compiler"), c
+    hook = "RuntimeError: loom bundle not built \u2014 npm not found on PATH.\nerror: metadata-generation-failed"
+    c = classify.classify(hook, rung="L0")
+    assert (c.action, c.arg, c.rule) == ("ADD_APT_PKG", "nodejs npm", "no_npm"), c
+    assert classify.classify("sh: 1: npm: not found", rung="L3", exit_code=1).rule != "no_npm"
+
+@check("driver: ADD_PKG of a name the repo declares from git installs that git source, not the same-named index project (aks-rerun-7: viva-membrane-actin's optional pbg-mem3dg)")
+def _d_add_pkg_declared_source():
+    vcs = {"pbg-mem3dg": "git:https://github.com/o/pbg-mem3dg.git#" + "e" * 40, "local-sib": "path:../sib"}
+    got = driver.declared_source_arg("pbg_mem3dg", vcs)
+    assert got == "pbg-mem3dg @ git+https://github.com/o/pbg-mem3dg@" + "e" * 40, got
+    for same in ("scipy", "scipy>=1.10", "BH Rcpp", "local-sib"):       # index names, families, path sources: untouched
+        assert driver.declared_source_arg(same, vcs) == same, same
+    out = patch.apply(spec(), "ADD_PKG", got).spec.pkg_specs
+    assert got in out and "@" not in [s.strip() for s in out], out      # one requirement, not split on spaces
+
 @check("driver M7: git sources a git dependency itself needs are added as direct references -- from the lockfile's closure at its shas, else from the dependency's own [tool.uv.sources] (hold-out 6b: vivarium-workbench -> viva-basic-processes / viva-marketplace, four repos at L0)")
 def _d_transitive_git():
     wb = "git+https://github.com/o/workbench@" + "a" * 40

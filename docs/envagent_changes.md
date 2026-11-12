@@ -680,7 +680,21 @@ Harness fixes made after the pass (not in an image yet; next tag `rev4.17`):
   `git:<ref> (needed by <parent>)`; a branch ref is listed under `vcs_unpinned`. `init` now makes outbound requests
   to GitHub for repos with git dependencies and no lockfile; a failed fetch adds nothing.
 
-Observed, not yet acted on (one observation each, or a design decision): R `Remotes:`; `cannot import name` from a lock-pinned package → unpin to the
+**After `aks-rerun-7`** (12 Nov, rev4.17 image, seven single-repo reruns; `rerun_aks-rerun-7_report.md`): M7 confirmed
+live — all seven install `vivarium-workbench` with its git dependencies; viva-cpm verified for the first time. Tree
+changes (203 checks, not in an image; next tag `rev4.18`):
+
+- **Rule `no_npm`** (`src/classify.py`), L0 only: `npm not found` from a build hook → `ADD_APT_PKG nodejs npm`
+  (viva-simbio, viva-membrane-actin). Declines at L3.
+- **Rule `no_compiler`** also matches rustc's "linker cc not found" message (viva-cpm, viva-biofilm).
+- **`ADD_PKG` honours a declared git source** (`src/driver.py` `declared_source_arg`, state `vcs_deps`;
+  `src/patch.py` no longer splits a direct reference on spaces): viva-membrane-actin's demo imports `pbg_mem3dg`,
+  declared from git in an optional group.
+- **A rule handler may return nothing** to decline; the table moves on.
+- Ground truth: viva-cpm's example is `python demos/run_cc3d_demos.py` (was empty).
+
+Observed, not yet acted on (one observation each, or a design decision): `compile_failed` proposes `PIN_PKG` with no
+version and the model invents one (viva-amici `1.6.2`, viva-simbio `0.0.66`); R `Remotes:`; `cannot import name` from a lock-pinned package → unpin to the
 declared range; extras-only git dependencies in the draft; README `make test` with no Makefile; apt on a non-root
 micromamba base; the non-Julia L1 probe on a Julia base (O10 now changes the control's verdict); H24 not effective
 live for `mkl` / `intel-cmplr-lib-rt`; `gitpython` needs the `git` binary; R `dyn.load` missing soname falls to the

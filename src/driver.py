@@ -316,6 +316,22 @@ def git_direct_ref(name: str, source: str | None) -> str | None:
     return f"git+{url}" + (f"@{ref}" if ref else "")
 
 
+def declared_source_arg(arg: str, vcs_deps: dict) -> str:
+    """ADD_PKG `pbg_mem3dg` -> `pbg-mem3dg @ git+https://...@<sha>` when the repo
+    declares that name from git (an optional group the draft left out, say).
+    Without this the bare name goes to the index, which either has nothing or has
+    a same-named project that is not what the repo declared -- the substitution
+    that made passes 4-5 look better than they were. Anything else is returned
+    unchanged.
+    ponytail: the added package's own git sources are not followed (M7 runs at
+    draft time only); pip names the next one at L0 if there is one."""
+    if not re.fullmatch(r"[A-Za-z0-9][\w.\-]*", arg or ""):
+        return arg
+    key = _dist_key(arg)
+    ref = git_direct_ref(key, (vcs_deps or {}).get(key))
+    return f"{key} @ {ref}" if ref else arg
+
+
 def _fetch_pyproject(ref: str) -> str:
     """`git+https://github.com/org/repo@ref` -> that ref's pyproject.toml text, "" on any failure.
     ponytail: GitHub raw only; other hosts need a shallow clone, add when a repo needs one."""
@@ -721,7 +737,7 @@ def cmd_init(args, cfg) -> None:
     if skipped:
         findings.append({"code": "optional_groups_skipped", "entry": None, "suggestion": None,
                          "detail": "heavy/alternative-backend extras left out of the draft; ADD_PKG from them only "
-                                   "when L3 asks: " + "; ".join(f"[{g}] {', '.join(v[:6])}" for g, v in skipped.items())})
+                                   "when L2/L3 asks (a git-sourced name is installed from its declared source): " + "; ".join(f"[{g}] {', '.join(v[:6])}" for g, v in skipped.items())})
     if getattr(draft_spec, "undeclared", None):
         findings.append({"code": "undeclared_imports", "entry": None, "suggestion": None,
                          "detail": "the package imports modules no dependency list or lockfile declares; "
@@ -785,6 +801,9 @@ def cmd_init(args, cfg) -> None:
         "closed": False,
         "local_modules": ev.get("local_modules") or [],
         "pkg_origin": getattr(draft_spec, "pkg_origin", {}),
+        # every non-index source the repo declares, installed or not: `patch`
+        # reads it so a later ADD_PKG of one of these names uses that source
+        "vcs_deps": getattr(draft_spec, "vcs_deps", {}),
         "source_tops": ev.get("source_tops") or [],
         "examples": ev.get("examples") or [],
         # The project's own interpreter constraint, for CHANGE_INTERPRETER_VERSION.
@@ -1251,7 +1270,10 @@ def cmd_patch(args, cfg) -> None:
         rollback = f"regressed to {last.get('reached')}; rolled back to best {best['rung']}"
 
     try:
-        result = patch_mod.apply(spec, args.action, args.arg or "")
+        arg = args.arg or ""
+        if args.action == "ADD_PKG":
+            arg = declared_source_arg(arg, state.get("vcs_deps") or {})
+        result = patch_mod.apply(spec, args.action, arg)
     except patch_mod.PatchError as exc:
         die(str(exc), code=3)
 

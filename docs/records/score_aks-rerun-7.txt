@@ -1,0 +1,35 @@
+run: aks-rerun-7   trials: 7   buildable trials: 7
+
+  build success         14.3 %   (95% CI 3-51 %)
+  verdict correctness   14.3 %
+  false-verified       0
+  succeeded after correcting the annotation: 1
+  verified on a test suite only (not counted): 0
+  verified on a usage banner only (not counted): 0
+  of the successes, started from memory:       0
+  of the successes, on an alternate shipped example: 0
+
+  failure attribution (buildable, non-success):
+    builder        4
+    unattributed   1
+    annotation     1
+
+  median charged attempts   4
+  infra retries (uncharged) 0
+  LLM-fallback share         60.0 %
+  failed_step_index cover.  100.0 %
+
+  per model:
+    viva-amici             buildable              trials=1 success=0 correct=0
+    viva-artistoo          buildable              trials=1 success=0 correct=0
+    viva-biofilm           buildable              trials=1 success=0 correct=0
+    viva-cpm               buildable              trials=1 success=1 correct=1
+    viva-membrane-actin-composite buildable              trials=1 success=0 correct=0
+    viva-simbio            buildable              trials=1 success=0 correct=0
+    viva-yalla             buildable              trials=1 success=0 correct=0
+      - viva-amici           job-2026-11-12-3e76: failed@L1 MISSING_DEPENDENCY -> builder  ran=python demo/demo_report.py [repo_example]
+      - viva-artistoo        job-2026-11-12-65b2: escalated@L2 RUNTIME_ERROR -> unattributed  ran=python demo/demo_report.py [repo_example]
+      - viva-yalla           job-2026-11-12-cd84: escalated@L2 IMPORT_PATH_ERROR -> builder  ran=python demo/composite_report.py [agent]
+      - viva-simbio          job-2026-11-12-d0d1: failed@L1 DEP_RESOLUTION_CONFLICT -> builder  ran=python demo/demo_report.py [repo_example]
+      - viva-membrane-actin-composite job-2026-11-12-c374: escalated@L1 MISSING_DEPENDENCY -> builder  ran=python demo/demo_report.py [repo_example]
+      - viva-biofilm         job-2026-11-12-0224: escalated@L2 RUNTIME_ERROR -> annotation  ran=python workspace/studies/spatial-biofilm-growth/run_study.py [repo_example]

@@ -527,9 +527,21 @@ def _rules():
          simple("DEP_RESOLUTION_CONFLICT", "UNPIN_PKG")),
         ("no_matching_dist", re.compile(r"No matching distribution found for (\S+)"),
          no_matching_dist),
+        # rustc's wording for the same fact: "error: linker `cc` not found"
+        # (maturin builds of viva-cpm and viva-biofilm, aks-rerun-7).
         ("no_compiler", re.compile(r"(?:unable to execute '(?:gcc|cc|g\+\+)'|"
-                                   r"(?:gcc|cc|g\+\+): (?:command )?not found)"),
+                                   r"(?:gcc|cc|g\+\+): (?:command )?not found|"
+                                   r"linker `(?:cc|gcc)` not found)"),
          simple("COMPILE_ERROR", "ADD_APT_PKG", "build-essential")),
+        # A build hook that shells out to npm (vivarium-workbench's loom bundle:
+        # viva-simbio and viva-membrane-actin, aks-rerun-7 -- both got past L0 on
+        # exactly this repair, after the model spent 1-3 attempts finding it).
+        # L0 only: at L3 the same words mean the MODEL needs Node at run time,
+        # which is a design item (no run-time egress for `npm install`), not a
+        # build tool to add.
+        ("no_npm", re.compile(r"npm not found on PATH|npm: (?:command )?not found"),
+         lambda m, c: Classification("COMPILE_ERROR", action="ADD_APT_PKG", arg="nodejs npm",
+                                     evidence=m.group(0)) if c.get("rung") == "L0" else None),
         ("no_cmake", re.compile(r"cmake: (?:command )?not found|CMake must be installed"),
          simple("COMPILE_ERROR", "ADD_APT_PKG", "cmake")),
         ("compile_failed", re.compile(r"error: command '.*(?:gcc|g\+\+|cc1plus|clang)'.* failed|"
@@ -657,6 +669,8 @@ def classify(stderr: str, rung: str = "L0", local_modules=(), exit_code: int | N
                             "python_version": python_version,
                             "source_tops": set(source_tops or ()),
                             "workdir_moved": bool(mount) and mount.get("workdir") != mount.get("code_path")})
+            if c is None:          # the rule declined (rung-gated); let later rules look
+                continue
             c.rule = name
             # A class that normally dead-letters may still carry one typed
             # action from its handler (TIMEOUT at L3 -> SET_L3_TIMEOUT). The

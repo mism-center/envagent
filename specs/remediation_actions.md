@@ -8,7 +8,7 @@ attempt record.
 | Action | `--arg` format | Effect on the EnvSpec |
 |---|---|---|
 | `ADD_APT_PKG` | `libxml2-dev`, or a family `libgl1 libglib2.0-0 libxcb1` | append to `apt_packages` (one entry per package; still one action) |
-| `ADD_PKG` | `scipy`, `scipy>=1.10`, or a family of bare names `BH Rcpp RcppEigen` | append to `pkg_specs` (one entry per name; still one action) |
+| `ADD_PKG` | `scipy`, `scipy>=1.10`, or a family of bare names `BH Rcpp RcppEigen` | append to `pkg_specs` (one entry per name; still one action). A bare name the repo declares from git is rendered as that git reference (`name @ git+url@sha`), never fetched from the index |
 | `REMOVE_PKG` | `libsbml` | drop the matching entry from `pkg_specs` (for `UNKNOWN_DISTRIBUTION`; say why) |
 | `PIN_PKG` (refused for R specs: `install.packages()` takes names only) | `numpy==1.26.4` (constraint required) | replace the existing entry for that distribution |
 | `UNPIN_PKG` | `numpy` | strip the constraint, keep the name |

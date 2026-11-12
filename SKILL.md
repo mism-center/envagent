@@ -193,9 +193,11 @@ crashes mid-run, call `verdict --status error` before you stop.
 versions: none)` with no network fault) means the index has no project named X.
 `init` reports where each name came from (`annotation_findings`:
 `vcs_dependency`, `undeclared_imports`). An import-name guess → `REMOVE_PKG X`
-(the rule supplies it). A git/path-sourced sibling → `escalated` with the
-source URL in the reason; do not try to `pip install git+…` through
-`ADD_PRE_INSTALL_CMD`. A declared dependency that truly does not exist → check
+(the rule supplies it). A git-sourced dependency the draft left out (an optional
+group; `optional_groups_skipped`) that the example imports → `ADD_PKG <name>`:
+the driver renders it as the git reference the repo declares. A path/workspace
+sibling → `escalated` with the source in the reason; do not try to
+`pip install git+…` through `ADD_PRE_INSTALL_CMD`. A declared dependency that truly does not exist → check
 the spelling against the repo's own files once, then `REMOVE_PKG` with a reason
 or `escalated`.
 

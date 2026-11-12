@@ -177,7 +177,7 @@ def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
     if action == "ADD_PKG":
         # One action may name a family when the rule table does (R's plural
         # "dependencies ... are not available"): space-separated bare names.
-        items = arg.split() if (" " in arg and not re.search(r"[<>=!~;\[]", arg)) else [arg]
+        items = arg.split() if (" " in arg and not re.search(r"[<>=!~;\[@]", arg)) else [arg]
         added = []
         for it in items:
             if any(req_name(s) == req_name(it) for s in new.pkg_specs):

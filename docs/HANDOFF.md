@@ -12,6 +12,11 @@ work continues from the records rather than from memory. `STATE.md` is the narra
 > 2. Build transitive git sources (a git dependency's own `[tool.uv.sources]`): viva-cpm, viva-artistoo, viva-yalla,
 >    viva-amici all stop there. Single-repo reruns, then `aks-holdout-7`.
 > 3. Open decision: do README code blocks / R vignettes count as the repo's example (starsim, epidemics, epimodel)?
+>
+> **Update 12 Nov, later.** rev4.17 image built (`sha256:dbf7b838…`), M7 in it. `aks-rerun-7` (seven repos): viva-cpm
+> verified, the rest each reached a new obstacle (`rerun_aks-rerun-7_report.md`). Tree is past the image (203 checks:
+> `no_npm`, rustc linker, `ADD_PKG` from a declared git source) — next tag **`rev4.18`**, then `aks-holdout-7`,
+> pre-registered **5–6/19**. Decide first whether to archive the hold-out memory entries (search vs recall).
 > The AKS kubeconfig is passed with `KUBECONFIG=`; never copy or print it. Steps 1–4 below are historical.
 
 ## 1. Immediate next steps, in order
