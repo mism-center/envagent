@@ -140,6 +140,10 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
         rows = by_job.get(v["job_id"], [])
         t = {"model": m, "job_id": v["job_id"], "status": v.get("status"), "rung": v.get("ladder_reached"),
              "failure_class": v.get("failure_class"), "buildable": bool(g.get("buildable")),
+             # `scope` in the ground truth: absent = the repo has a runnable example the
+             # platform's current policy can count; `policy:<why>` = it cannot succeed
+             # until a decision changes (unbuilt runtime, tests-only repo).
+             "in_scope": bool(g.get("buildable")) and not str(g.get("scope") or "").startswith("policy:"),
              "entrypoint_used": v.get("entrypoint_used"), "entrypoint_source": v.get("entrypoint_source"),
              "corrections": [c for c in (v.get("annotation_corrections") or []) if c.get("outcome") in ("verified", "helped")],
              "charged_attempts": v.get("charged_attempts", v.get("attempts")),
@@ -204,6 +208,12 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
         "void_source_mismatch": [f"{t['model']} ({t['job_id']}, {t['status']})" for t in void],
         "build_success": (n_ok / len(b)) if b else None,
         "build_success_ci95": _wilson(n_ok, len(b)) if b else None,
+        # The same successes over the trials that could have succeeded. The
+        # headline over all buildable repos stays; this says how much of the
+        # gap is the builder's and how much is policy.
+        "in_scope_trials": sum(1 for t in b if t["in_scope"]),
+        "in_scope_success": sum(1 for t in b if t["in_scope"] and t["success"]),
+        "policy_capped": sorted({t["model"] for t in b if not t["in_scope"]}),
         "verdict_correctness": (sum(1 for t in trials if t["correct"]) / len(trials)) if trials else None,
         "false_verified": len(false_verified),
         "false_verified_trials": [{"job_id": t["job_id"], "model": t["model"], "why": t["honesty"]} for t in false_verified],
@@ -261,6 +271,9 @@ def main(argv=None) -> int:
     ci = res["build_success_ci95"]
     print(f"  build success        {_pct(res['build_success'])}"
           + (f"   (95% CI {100 * ci[0]:.0f}-{100 * ci[1]:.0f} %)" if ci else ""))
+    if res["policy_capped"]:
+        print(f"  of which in scope    {res['in_scope_success']}/{res['in_scope_trials']}"
+              f"   (cannot succeed under current policy: {', '.join(res['policy_capped'])})")
     print(f"  verdict correctness  {_pct(res['verdict_correctness'])}")
     print(f"  false-verified       {res['false_verified']}" + ("   <-- MUST BE 0" if res["false_verified"] else ""))
     print(f"  succeeded after correcting the annotation: {res['corrected_annotation_and_succeeded']}")

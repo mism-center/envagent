@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 
 import registry
+from classify import py_satisfying
 
 # Rule table, first match wins. Order matters: conda beats plain python because
 # an environment.yml means the author already fought the solver and won.
@@ -44,10 +45,19 @@ def _python_tag(evidence: dict, annotation: dict) -> str:
     CI is first on purpose: a green workflow is a *verified* version on a known
     OS, which beats a `requires-python` floor that nobody ever tested against.
     """
+    # The project's own constraint outranks everything below: a CI matrix that
+    # says 3.11 beside `requires-python = ">=3.12"` is a stale workflow, not a
+    # tested version (viva-cpm's templated CI), and a base that violates the
+    # constraint fails at L0 on the project itself.
+    ok = py_satisfying(str(evidence.get("python", {}).get("requires_python") or ""))
+
+    def allowed(v: str) -> bool:
+        return not ok or v in ok
+
     for ci in evidence.get("ci") or []:
         for v in ci.get("python_versions") or []:
             m = _PY_TAG.search(str(v))
-            if m:
+            if m and allowed(m.group(1)):
                 return m.group(1)
     for src in (annotation.get("language_version"),
                 evidence.get("python", {}).get("requires_python")):
@@ -55,9 +65,13 @@ def _python_tag(evidence: dict, annotation: dict) -> str:
             continue
         m = _PY_TAG.search(str(src))
         # ">=3.9" is a floor, not a target -- only trust an exact-looking pin.
-        if m and not _is_floor(src):
+        if m and not _is_floor(src) and allowed(m.group(1)):
             return m.group(1)
-    return "3.11"
+    # No target anywhere: the default, or -- when the default violates the
+    # floor -- the oldest interpreter that satisfies it, which is the one
+    # closest to what the author declared (aks-rerun-7: viva-cpm, viva-biofilm
+    # each spent an attempt learning what pyproject already said).
+    return "3.11" if allowed("3.11") else ok[0]
 
 
 def _is_floor(constraint) -> bool:

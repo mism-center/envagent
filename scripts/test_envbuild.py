@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import baseselect                                     # noqa: E402
 import classify                                       # noqa: E402
 import driver                                         # noqa: E402
+driver._pypi_json = lambda _name: None                # the suite is offline: the index has no opinion
 import evidence                                       # noqa: E402
 import ladder                                         # noqa: E402
 import normalize                                      # noqa: E402
@@ -2458,6 +2459,41 @@ def _s_source_mismatch():
     assert res["buildable_trials"] == 0 and res["void_source_mismatch"], res
     res = _score.score([], [dict(v, code_revision="abc")], gt, None)
     assert res["buildable_trials"] == 1 and not res["void_source_mismatch"], res
+
+@check("draft: the interpreter default honours a requires-python floor; a native build gets a compiler; L3 runs in a writable copy (aks-rerun-7: cpm and biofilm each lost attempts to all three)")
+def _d_draft_knows_what_the_repo_says():
+    assert baseselect._python_tag({"python": {"requires_python": ">=3.12"}}, {}) == "3.12"
+    assert baseselect._python_tag({"python": {"requires_python": ">=3.9"}}, {}) == "3.11"      # default already satisfies
+    assert baseselect._python_tag({"python": {"requires_python": "<3.11"}}, {}) == "3.9"
+    assert baseselect._python_tag({"python": {}}, {}) == "3.11"
+    stale_ci = {"ci": [{"python_versions": ["3.11"]}], "python": {"requires_python": ">=3.12"}}
+    assert baseselect._python_tag(stale_ci, {}) == "3.12"                                       # CI cannot overrule the project
+    assert baseselect._python_tag({"ci": [{"python_versions": ["3.10"]}], "python": {"requires_python": ">=3.9"}}, {}) == "3.10"
+    root = _repo({"pyproject.toml": '[build-system]\nrequires=["maturin>=1"]\nbuild-backend="maturin"\n[project]\nname="m"\nversion="0"\nrequires-python=">=3.12"\ndependencies=["numpy"]\n',
+                  "m/__init__.py": "", "run.py": "import m\n"})
+    ev = evidence.scan(str(root))
+    choice = baseselect.select(ev, {})
+    s = driver.draft_spec(ev, {}, choice, "sha256:" + "0" * 64, "kaniko")
+    assert choice.base_image == "python:3.12-slim" and "build-essential" in s.apt_packages and s.mount.writable_copy, (choice, s)
+
+@check("driver: a pin the index does not have for this interpreter is refused before it costs a build; an unknown index has no opinion (viva-amici amici==1.6.2, viva-simbio process-bigraph==0.0.66)")
+def _d_index_versions():
+    saved = driver._pypi_json
+    driver._pypi_json = lambda _n: {"releases": {
+        "1.0.0": [{"requires_python": ">=3.9"}], "1.0.1": [{"requires_python": ">=3.9"}],
+        "1.2.0": [{"requires_python": ">=3.12"}], "1.10.0": [{"requires_python": ">=3.12"}], "0.9": [{"yanked": True}]}}
+    try:
+        have = driver.index_versions("amici")
+        assert have["3.11"] == ["1.0.0", "1.0.1"] and have["3.13"][-1] == "1.10.0", have       # numeric order, not text
+    finally:
+        driver._pypi_json = saved
+    assert driver.index_versions("amici") == {}
+
+@check("logs: key_lines pulls the failure-naming lines from the whole log, not its tail")
+def _l_key_lines():
+    text = "CMake Error: No CMAKE_C_COMPILER could be found.\n" + "noise line\n" * 900 + "ERROR: Could not build wheels for amici\n"
+    got = logs.key_lines(text)
+    assert got[0].startswith("CMake Error") and got[-1].startswith("ERROR: Could not build") and len(got) == 2, got
 
 @check("rules from aks-rerun-7: rustc's missing linker is the missing compiler; a build hook without npm gets nodejs+npm at L0 only (at L3 it is a Node-runtime model, a design item)")
 def _c_rerun7_rules():

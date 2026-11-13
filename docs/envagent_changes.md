@@ -693,6 +693,23 @@ changes (203 checks, not in an image; next tag `rev4.18`):
 - **A rule handler may return nothing** to decline; the table moves on.
 - Ground truth: viva-cpm's example is `python demos/run_cc3d_demos.py` (was empty).
 
+**rev 4.18 (13 Nov), after a critical review of six flat passes.** The loop was paying attempts for facts the repo
+states and for guesses the index could have refused. 206 checks.
+
+- **Draft honours `requires-python`** (`src/baseselect.py`): the project's constraint outranks a CI matrix and the
+  3.11 default; a floor the default violates selects the oldest interpreter that satisfies it. viva-cpm (stale
+  templated CI says 3.11, pyproject says `>=3.12`) and viva-biofilm each lost an attempt to it.
+- **Draft adds `build-essential`** when the project itself builds native code (maturin / ext_modules / .pyx).
+- **L3 runs in a writable copy by default** (`draft_spec`): seven repos each spent one attempt on `Read-only file
+  system`. The models claim stays read-only; the copy is per-pod.
+- **Index check** (`src/driver.py` `index_versions`, `envbuild versions`): a `==` pin the index does not offer the
+  job's interpreter is refused before a build, uncharged, with the versions that exist. Unknown index → no opinion.
+- **`error_lines`** (`src/logs.py` `key_lines`): the attempt result carries the failure-naming lines of the whole log.
+- **Scorer** prints successes over in-scope trials; `scope: 'policy:<why>'` in the ground truth marks the nine
+  hold-out repos that cannot succeed under current policy (my classification; a policy change is a one-line edit).
+
+These change what an attempt costs, so attempt counts are not comparable with passes 1–6.
+
 Observed, not yet acted on (one observation each, or a design decision): `compile_failed` proposes `PIN_PKG` with no
 version and the model invents one (viva-amici `1.6.2`, viva-simbio `0.0.66`); R `Remotes:`; `cannot import name` from a lock-pinned package → unpin to the
 declared range; extras-only git dependencies in the draft; README `make test` with no Makefile; apt on a non-root

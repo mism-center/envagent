@@ -178,6 +178,7 @@ models:
     design_item: M1 (git deps) -- now rendered; sim extras need pymem3dg/readdy compiled backends
   viva-artistoo:
     buildable: true
+    scope: 'policy:needs a Node runtime and npm install at run time (no egress)'
     language: python
     example: python demo/demo_report.py
     example_full: null
@@ -242,6 +243,7 @@ models:
     notes: AMICI compiles ODE models with a C++ toolchain at run time — build-deps family
   viva-biofilm:
     buildable: true
+    scope: 'policy:Kaleido needs headless Chrome'
     language: html
     example: pytest -q
     example_full: null
@@ -273,6 +275,7 @@ models:
       expected in the annotation-less pass'
   starsim:
     buildable: true
+    scope: 'policy:tests only (README code blocks are not counted)'
     language: python
     example: null
     example_full: null
@@ -291,6 +294,7 @@ models:
     policy_note: no README command; a shipped example script counts, `pytest` does not (decision 2026-10-07)
   physicell:
     buildable: true
+    scope: 'policy:example downloads from api.github.com at run time (no egress)'
     language: c++
     example: python beta/get_physicell.py
     example_full: null
@@ -307,6 +311,7 @@ models:
     design_item: M7 run-time download, no egress
   epimodel:
     buildable: true
+    scope: 'policy:tests only (vignettes are not counted)'
     language: r
     example: null
     example_full: null
@@ -324,6 +329,7 @@ models:
     design_item: M6 R compile budget -- now P3M binaries; may verify
   epidemics:
     buildable: true
+    scope: 'policy:tests only (vignettes are not counted)'
     language: r
     example: null
     example_full: null
@@ -340,6 +346,7 @@ models:
       pass'
   covid-sim:
     buildable: true
+    scope: 'policy:C++ binary; no documented run the builder can ground'
     language: c++
     example: make test
     example_full: null
@@ -371,6 +378,7 @@ models:
     notes: Python + NeuroML; simulation needs jNeuroML (Java) or NEURON
   biosimulators_tellurium:
     buildable: true
+    scope: 'policy:tests only'
     language: python
     example: null
     example_full: null
@@ -387,6 +395,7 @@ models:
       expected in the annotation-less pass'
   covid19model:
     buildable: true
+    scope: 'policy:conda-style R names; no entry point'
     language: stan
     example: null
     example_full: null

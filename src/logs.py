@@ -93,6 +93,24 @@ def decode(text: str | None) -> str:
     return "\n".join(cleaned)
 
 
+_KEY = re.compile(r"\berror\b|\bfatal\b|not found|No such file|cannot find|Could NOT find|"
+                  r"Traceback|Exception:|requires a different|No matching distribution", re.I)
+
+
+def key_lines(text: str | None, cap: int = 30) -> list[str]:
+    """The lines of the decoded log that name a failure, first occurrence each,
+    in order, at most `cap` (first half and last half when there are more).
+    The tail alone hides the cause when a build prints hundreds of lines after
+    it: viva-amici's CMake error sat above an 8000-character tail and the model
+    spent three attempts guessing (aks-rerun-7)."""
+    seen, out = set(), []
+    for line in decode(text).splitlines():
+        s = line.strip()[:240]
+        if s and s not in seen and _KEY.search(s):
+            seen.add(s); out.append(s)
+    return out if len(out) <= cap else out[:cap // 2] + out[-(cap - cap // 2):]
+
+
 def tail(text: str | None, n: int) -> str:
     """Last `n` bytes of the *decoded* text. Decode first, then cut -- cutting
     an encoded stream first is exactly how the real error got lost."""

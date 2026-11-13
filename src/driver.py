@@ -332,6 +332,42 @@ def declared_source_arg(arg: str, vcs_deps: dict) -> str:
     return f"{key} @ {ref}" if ref else arg
 
 
+def _pypi_json(name: str):
+    """PyPI's JSON for a project, None on any failure (the caller then knows nothing)."""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(
+                f"https://pypi.org/pypi/{_dist_key(name)}/json", headers={"User-Agent": "envbuild/0"}), timeout=15) as r:
+            return json.loads(r.read(20_000_000))
+    except Exception:
+        return None
+
+
+def index_versions(name: str) -> dict:
+    """{python minor: [versions the index offers that interpreter, oldest first]}, {} when unknown.
+    A version counts for an interpreter when one of its files' `requires_python`
+    admits it (or says nothing) and the file is not yanked.
+    ponytail: minor-level only and blind to wheel tags -- an sdist-only release
+    counts as installable. Enough to refuse a version that does not exist."""
+    data = _pypi_json(name)
+    out = {p: [] for p in classify_mod._PY_LADDER}
+    for ver, files in ((data or {}).get("releases") or {}).items():
+        pys = set()
+        for f in files or []:
+            if not f.get("yanked"):
+                rp = f.get("requires_python")
+                pys.update(classify_mod.py_satisfying(rp) if rp else classify_mod._PY_LADDER)
+        for p in pys:
+            out[p].append(ver)
+    def key(v):
+        return [int(x) if x.isdigit() else -1 for x in re.split(r"[.+\-]", re.sub(r"(\d)([a-z])", r"\1.\2", v))]
+    return {p: sorted(vs, key=key) for p, vs in out.items() if vs}
+
+
+def _spec_python(spec) -> str | None:
+    m = re.match(r"python:(\d+\.\d+)", spec.base_image or "")
+    return m.group(1) if m else None
+
+
 def _fetch_pyproject(ref: str) -> str:
     """`git+https://github.com/org/repo@ref` -> that ref's pyproject.toml text, "" on any failure.
     ponytail: GitHub raw only; other hosts need a shallow clone, add when a repo needs one."""
@@ -413,7 +449,15 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
         deps = list(ann.get("declared_deps") or []) or list((ev.get("r") or {}).get("deps") or [])
     if choice.pkg_manager == "mamba":
         deps = list((ev.get("conda") or {}).get("deps") or deps)
-    apt = sorted(set(list(ann.get("system_deps") or []) + list(ev["system_hints"]["apt"])))
+    apt = set(list(ann.get("system_deps") or []) + list(ev["system_hints"]["apt"]))
+    c = ev.get("compiled") or {}
+    if choice.pkg_manager == "pip" and choice.install_mode == "installed" and (
+            c.get("ext_modules") or c.get("pyx") or c.get("build_requires_compiler")):
+        # The project builds native code and slim bases ship no compiler. The
+        # evidence already says so; do not spend an attempt rediscovering it
+        # (viva-cpm, viva-biofilm: `linker cc not found`).
+        apt.add("build-essential")
+    apt = sorted(apt)
     # Honour the author's lockfile: every declared dependency it resolves gets
     # its locked version, extras kept, other constraints replaced. Direct deps
     # only -- pip then resolves the transitive closure against the pins, which
@@ -509,7 +553,13 @@ def draft_spec(ev: dict, ann: dict, choice, digest: str, builder_version: str) -
     # which of the two it is (evidence._local_modules); seed it here instead of
     # waiting for the L2 failure + a repair attempt to rediscover the same fact
     # per repo.
-    mount = MountContract()
+    # L3 runs in a writable copy of the code by default. A read-only code mount
+    # is the platform's property, not the model's: an author runs the example
+    # in a checkout they can write to, and nearly every example that reached L3
+    # then spent one attempt on `Read-only file system` (tumor-tcell, mgen,
+    # c302, cpm, amici, biofilm, yalla). The models claim itself stays
+    # read-only; the copy is per-pod and what the run wrote is harvested.
+    mount = MountContract(writable_copy=True)
     local_dirs = sorted(set((ev.get("local_module_paths") or {}).values()))
     if choice.install_mode == "installed":
         # Installed mode: the package comes from site-packages; code_path on the
@@ -1176,6 +1226,8 @@ def cmd_attempt(args, cfg) -> None:
         "duration_s": row["duration_s"], "outputs_written": outputs,
         "error_signature": row["error_signature"],
         "stderr_tail": logs_mod.tail(stderr, 4000),
+        # from the whole log, not the tail: the cause is often far above it
+        "error_lines": [] if ok else logs_mod.key_lines(stderr),
         "lockfile": {"format": lock["format"], "sha256": lock["sha256"],
                      "entries": len(lock["entries"]),
                      "file": str(job_dir(cfg, state["job_id"]) / f"lockfile.a{attempt_no}.txt")}
@@ -1271,6 +1323,20 @@ def cmd_patch(args, cfg) -> None:
 
     try:
         arg = args.arg or ""
+        pin = re.fullmatch(r"\s*([A-Za-z0-9][\w.\-]*)(?:\[[^\]]*\])?==([\w.+!\-]+)\s*", arg)
+        if args.action in ("PIN_PKG", "ADD_PKG") and pin and spec.pkg_manager == "pip" and _spec_python(spec):
+            # A pin the index does not have costs a whole build to find out
+            # (viva-amici `amici==1.6.2`, viva-simbio `process-bigraph==0.0.66`).
+            # Refused here, uncharged, with what the index does have. Unknown
+            # index (offline, private package) -> no opinion.
+            have = index_versions(pin.group(1))
+            mine = have.get(_spec_python(spec)) or []
+            if have and pin.group(2) not in mine:
+                die(f"{args.action} refused: {pin.group(1)}=={pin.group(2)} is not on the index for Python "
+                    f"{_spec_python(spec)}. Nothing was changed and no attempt was charged.", code=3,
+                    available_for_this_python=mine[-12:],
+                    newest_by_python={p: vs[-1] for p, vs in have.items()},
+                    discarded={"action": args.action, "arg": args.arg})
         if args.action == "ADD_PKG":
             arg = declared_source_arg(arg, state.get("vcs_deps") or {})
         result = patch_mod.apply(spec, args.action, arg)
@@ -1505,6 +1571,17 @@ def cmd_verdict(args, cfg) -> None:
           "annotation_patch": str(patch_file) if patch_file.exists() else None})
 
 
+def cmd_versions(args, cfg) -> None:
+    """What the index offers for a package, per interpreter -- so a pin is a fact, not a guess."""
+    state = load_state(cfg, args.job_id)
+    have = index_versions(args.pkg)
+    py = _spec_python(EnvSpec.from_dict(state["spec"]))
+    emit({"ok": bool(have), "package": _dist_key(args.pkg), "python": py,
+          "available_for_this_python": (have.get(py) or [])[-20:],
+          "newest_by_python": {p: vs[-1] for p, vs in have.items()},
+          **({} if have else {"error": "the index did not answer or has no such project"})})
+
+
 def cmd_inspect(args, cfg) -> None:
     state = load_state(cfg, args.job_id)
     rows = [r for r in record.read_jsonl(Path(cfg.get("paths", "outputs")) / "attempts.jsonl")
@@ -1564,6 +1641,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--classified-by", choices=("rule", "llm", "agent"), default="rule",
                    help="`agent` is an alias of `llm` (the taxonomy says 'agent retry')")
     s.set_defaults(fn=cmd_patch)
+
+    s = sub.add_parser("versions", help="list the versions the package index offers, per interpreter (free)")
+    s.add_argument("--job-id", required=True)
+    s.add_argument("--pkg", required=True)
+    s.set_defaults(fn=cmd_versions)
 
     s = sub.add_parser("reverify", help="replay the ladder against an existing image")
     s.add_argument("--job-id", required=True)

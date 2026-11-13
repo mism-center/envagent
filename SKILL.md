@@ -255,6 +255,13 @@ Read on demand, not up front:
   the verdict reason for a `verified` job.
 - **Every job ends in a verdict.** A job that ends without one is the single
   failure mode that corrupts the dataset.
+- **Never guess a version.** Before any `PIN_PKG name==X`, run
+  `envbuild versions --job-id <id> --pkg name` (free, no attempt): it lists what
+  the index offers this job's interpreter and the newest version per interpreter.
+  A pin the index does not have is refused without charge.
+- **Read `error_lines` before `stderr_tail`.** The attempt result carries the
+  failure-naming lines of the *whole* log; the tail is often only pip's summary
+  ("Failed to build X") with the cause hundreds of lines above it.
 - **`ADD_PKG` on an L2 import failure requires justification.** If the missing
   module is in `evidence.local_modules`, the mount is wrong and installing a
   same-named PyPI package ships a container that runs the wrong code.

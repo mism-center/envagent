@@ -60,6 +60,12 @@ def requires_python_pick(spec: str) -> str | None:
     """`>=3.9, <3.12` -> the newest interpreter in our ladder that satisfies it
     (3.11). Newest, because a newer patch line has the longer support window;
     None when nothing in the ladder fits."""
+    ok = py_satisfying(spec)
+    return ok[-1] if ok else None
+
+
+def py_satisfying(spec: str) -> list[str]:
+    """Every interpreter in our ladder a `requires-python` string admits, oldest first."""
     def key(v):
         a, b = v.split(".")[:2]
         return int(a), int(b)
@@ -72,7 +78,7 @@ def requires_python_pick(spec: str) -> str | None:
         ok = [x for x in ok if {"<": key(x) < v, "<=": key(x) <= v, ">": key(x) > v,
                                 ">=": key(x) >= v, "==": key(x)[:2] == v, "!=": key(x) != v,
                                 "~=": key(x) >= v}[op]]
-    return ok[-1] if ok else None
+    return ok
 
 
 # Wheels that need a whole family of system libraries at once. One soname

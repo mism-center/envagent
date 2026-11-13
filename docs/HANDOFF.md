@@ -17,6 +17,11 @@ work continues from the records rather than from memory. `STATE.md` is the narra
 > verified, the rest each reached a new obstacle (`rerun_aks-rerun-7_report.md`). Tree is past the image (203 checks:
 > `no_npm`, rustc linker, `ADD_PKG` from a declared git source) — next tag **`rev4.18`**, then `aks-holdout-7`,
 > pre-registered **5–6/19**. Decide first whether to archive the hold-out memory entries (search vs recall).
+>
+> **Update 13 Nov.** Tree is **rev 4.18** (206 checks): draft honours `requires-python`, adds a compiler for native
+> builds, writable copy by default; refused non-existent pins; `error_lines`; scorer reports in-scope (4/10 on 6b).
+> Open policy decisions (worth more than any mechanism): README snippets / vignettes as examples; Chrome and
+> build-time Node as ordinary apt packages. Next: noise measurement (in-scope repos x3), then `aks-holdout-7`.
 > The AKS kubeconfig is passed with `KUBECONFIG=`; never copy or print it. Steps 1–4 below are historical.
 
 ## 1. Immediate next steps, in order
