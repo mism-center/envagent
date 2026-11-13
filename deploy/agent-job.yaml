@@ -78,6 +78,11 @@ spec:
               value: "__RUN_ID__"
             - name: ENVBUILD_HARNESS_IMAGE
               value: "__AGENT_IMAGE__"
+            # "1" = this Job neither recalls a remembered spec nor starts from
+            # one: a search trial, for repeated runs of the same model. Anything
+            # else (including the unreplaced placeholder) leaves memory on.
+            - name: ENVBUILD_NO_MEMORY
+              value: "__NO_MEMORY__"
           envFrom:
             # Tuning first, credentials second. envFrom applies in order, so a
             # Secret always wins over a ConfigMap anyone with edit rights can

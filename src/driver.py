@@ -744,7 +744,7 @@ def cmd_init(args, cfg) -> None:
     # search into one attempt, and makes the result independent of which
     # repair the agent happens to pick first. `--no-memory` disables it.
     spec_source, recalled = "evidence", None
-    if not getattr(args, "no_memory", False):
+    if not getattr(args, "no_memory", False) and os.environ.get("ENVBUILD_NO_MEMORY") != "1":
         recalled = memory_mod.recall(cfg.get("paths", "outputs"), args.model_id or f"local:{Path(repo).name}")
     if recalled:
         try:
