@@ -728,3 +728,21 @@ micromamba base; the non-Julia L1 probe on a Julia base (O10 now changes the con
 live for `mkl` / `intel-cmplr-lib-rt`; `gitpython` needs the `git` binary; R `dyn.load` missing soname falls to the
 model (`libglpk.so.40` → `libglpk40`).
 
+# Noise run `aks-noise-8` — 2026-11-13, and rev 4.20 — a maintenance script is not an example
+
+Three memory-off repetitions of nine repos on rev4.18: **21/27 succeed**; six repos identical across all three
+trials; viva-amici and viva-simbio verify for the first time. Report: `docs/noise_aks-noise-8_report.md`.
+
+The run produced the first builder claims of success that are not successes: two `verified` verdicts on
+`scripts/lint-workspace.py` and `scripts/check-no-local-paths.sh`, reached by `SET_ENTRYPOINT` and counted by the
+scorer. Changes (208 checks; none of this is in an image yet, next tag `rev4.20` — rev4.19 was never built):
+
+- `src/examples.py` `helper_reason`; `src/driver.py` refuses `SET_ENTRYPOINT` to a helper (uncharged) and
+  `entry_tier` gains `helper`; `scripts/score.py` reports `verified on a maintenance script (not counted)` and
+  recomputes the tier for older rows.
+- `src/driver.py` `follows_through`: an `ADD_APT_PKG` after a broken build is applied to the regressed spec instead
+  of the rolled-back one (viva-membrane-actin, 3/3 trials lost to the rollback).
+- `src/classify.py` `no_compiler`: CMake's `CMAKE_CXX_COMPILER not set` / `No CMAKE_C_COMPILER could be found`.
+
+Open from this run: viva-simbio's lock pins a `pbg-emitters` commit upstream has deleted; output harvesting can
+credit an attempt with an earlier attempt's files; viva-yalla's README demo calls macOS `open`.

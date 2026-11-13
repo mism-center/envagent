@@ -235,6 +235,32 @@ def auto_choosable(e: dict) -> bool:
     return bool(re.match(r"(?i)readme(\.\w+)?$", src)) or src in AUTO_DIRS
 
 
+def helper_reason(command: str, examples: list[dict], code_path: str = "/model") -> str | None:
+    """Why a command is a repo HELPER and not the repo's example, or None.
+
+    aks-noise-8: with the README demo out of reach, the model twice moved the
+    entry point to a script that exists and exits 0 without running the model
+    (`python scripts/lint-workspace.py`, `bash scripts/check-no-local-paths.sh`)
+    and closed the job `verified`. An existing file is not an example. scripts/
+    is where maintenance lives (see `auto_choosable`), and `_INFRA_SCRIPT` names
+    are skipped by layout discovery for the same reason -- unless the root
+    README itself tells the reader to run that exact command.
+    """
+    c = re.sub(r"\s+", " ", (command or "").strip())
+    if any(re.sub(r"\s+", " ", e["command"]) == c and re.match(r"(?i)readme(\.\w+)?$", e["source"])
+           for e in examples or []):
+        return None
+    f = _file_token(c)
+    if not f:
+        return None
+    rel = f[len(code_path.rstrip("/")) + 1:] if f.startswith(code_path.rstrip("/") + "/") else f
+    if rel.startswith("scripts/"):
+        return f"{rel} is under scripts/ (maintenance helpers) and the README does not present it as a run"
+    if _INFRA_SCRIPT.search(Path(rel).stem):
+        return f"{rel} is a maintenance script by name (lint/setup/deploy/...), not a model run"
+    return None
+
+
 def _read(path: Path, limit: int = 200_000) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")[:limit]

@@ -2432,6 +2432,22 @@ def _d_entry_tier():
     assert driver.entry_tier("python demo/demo_report.py", "annotation") == "headline"
     assert driver.entry_tier("python studies/tumor-microenvironment/sims/run.py", "annotation") == "headline"
     assert driver.entry_tier("", None) == "none"
+    # rollback: an apt repair after a broken build keeps the regressed spec; anything else rolls back
+    assert driver.follows_through({"reached": "L0"}, "ADD_APT_PKG")
+    assert not driver.follows_through({"reached": "L0"}, "UNPIN_PKG")
+    assert not driver.follows_through({"reached": "L1"}, "ADD_APT_PKG")
+    # aks-noise-8: a linter the agent moved to is not the repo's example...
+    import examples as _ex
+    assert driver.entry_tier("python scripts/lint-workspace.py", "agent") == "helper"
+    assert driver.entry_tier("bash /model/scripts/check-no-local-paths.sh", "agent") == "helper"
+    assert _ex.helper_reason("python tools/lint_all.py", [])
+    assert driver.entry_tier("python demo/composite_report.py", "agent") == "headline"
+    # ...unless the root README presents exactly that command as the run,
+    readme = [{"command": "python scripts/run_model.py", "source": "README.md"}]
+    assert driver.entry_tier("python scripts/run_model.py", "agent", readme) == "headline"
+    # and a nested README does not count as the author's instruction.
+    nested = [{"command": "python scripts/scrape.py", "source": "data/README.md"}]
+    assert driver.entry_tier("python scripts/scrape.py", "agent", nested) == "helper"
 
 @check("driver H30: init refuses a --repo that is not the Job's MODEL_REPO (voided hold-out 6: the agent built another model's directory under bench:biosimulators_tellurium)")
 def _d_init_repo_binding():
@@ -2498,6 +2514,10 @@ def _l_key_lines():
 
 @check("rules from aks-rerun-7: rustc's missing linker is the missing compiler; a build hook without npm gets nodejs+npm")
 def _c_rerun7_rules():
+    for txt in ("CMake Error: CMAKE_CXX_COMPILER not set, after EnableLanguage",
+                "CMake Error at CMakeLists.txt:3 (project):\n  No CMAKE_C_COMPILER could be found."):
+        c = classify.classify(txt + "\nERROR: Failed building wheel for pymem3dg", rung="L0")
+        assert (c.action, c.arg, c.rule) == ("ADD_APT_PKG", "build-essential", "no_compiler"), c
     c = classify.classify("error: linker `cc` not found\n  = note: No such file or directory (os error 2)", rung="L0")
     assert (c.failure_class, c.action, c.arg, c.rule) == ("COMPILE_ERROR", "ADD_APT_PKG", "build-essential", "no_compiler"), c
     hook = "RuntimeError: loom bundle not built \u2014 npm not found on PATH.\nerror: metadata-generation-failed"

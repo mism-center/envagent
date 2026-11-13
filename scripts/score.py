@@ -168,6 +168,15 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
             # Decision 2026-10-07: a shipped demo script other than the README's
             # counts when `alternate_example_ok` is true; a test suite never
             # counts as the example (unless the ground truth's example IS the tests).
+            # aks-noise-8: an agent-chosen maintenance script (`scripts/lint-workspace.py`)
+            # is not an example either. Recomputed here from the command so rows
+            # written before the driver knew the 'helper' tier are scored the same.
+            if not t["ran_ground_truth"] and (tier == "helper" or (
+                    v.get("entrypoint_source") == "agent" and re.search(
+                        r"(?:^|\s)(?:/model/)?scripts/|(?:lint|format)[-_][\w\-]*\.(?:py|sh)\b",
+                        v.get("entrypoint_used") or ""))):
+                tier = "helper"
+            t["verified_helper"] = ok and not t["honesty"] and tier == "helper"
             t["verified_tests"] = ok and not t["honesty"] and tier == "tests" and not gt_example_is_tests
             t["verified_alternate"] = (ok and not t["honesty"] and tier == "headline" and not t["ran_ground_truth"]
                                        and bool(g.get("example")))
@@ -177,9 +186,10 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
                 t["flags"] = ["alternate example: set alternate_example_ok in ground truth to confirm"]
             # O2: exit 0 on a usage banner proves the image, not the example.
             t["verified_weak"] = ok and str((rows[-1] if rows else {}).get("l3_claim") or "").startswith("weak")
-            t["success"] = ok and not t["honesty"] and not t["verified_tests"] and not t["verified_weak"]
+            t["success"] = (ok and not t["honesty"] and not t["verified_tests"] and not t["verified_helper"]
+                            and not t["verified_weak"])
             t["spec_source"] = v.get("spec_source") or "evidence"
-            t["attribution"] = None if t["success"] else ("policy:alternate_example" if t["verified_tests"]
+            t["attribution"] = None if t["success"] else ("builder" if t["verified_helper"] else "policy:alternate_example" if t["verified_tests"]
                                                           else "weak_verification" if t["verified_weak"] else attribute(v, rows, g))
             t["correct"] = t["success"]
         else:
@@ -220,6 +230,7 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
         "attribution": dict(attr),
         "corrected_annotation_and_succeeded": sum(1 for t in b if t["success"] and t["corrections"]),
         "verified_tests_only": sum(1 for t in b if t.get("verified_tests")),
+        "verified_helper_only": sum(1 for t in b if t.get("verified_helper")),
         "verified_weak": sum(1 for t in b if t.get("verified_weak")),
         # Cross-job memory: how many successes started from a remembered spec.
         # Report both; a pass where every success is from memory has measured
@@ -278,6 +289,8 @@ def main(argv=None) -> int:
     print(f"  false-verified       {res['false_verified']}" + ("   <-- MUST BE 0" if res["false_verified"] else ""))
     print(f"  succeeded after correcting the annotation: {res['corrected_annotation_and_succeeded']}")
     print(f"  verified on a test suite only (not counted): {res['verified_tests_only']}")
+    print(f"  verified on a maintenance script (not counted): {res['verified_helper_only']}"
+          + ("   <-- builder claimed success without running the model" if res["verified_helper_only"] else ""))
     print(f"  verified on a usage banner only (not counted): {res['verified_weak']}")
     if res["void_source_mismatch"]:
         print(f"  VOID, source is not the pinned commit (not a trial): {', '.join(res['void_source_mismatch'])}")

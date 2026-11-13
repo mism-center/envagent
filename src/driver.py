@@ -660,12 +660,24 @@ def runner_deps(command: str, pkg_manager: str, ev: dict) -> list[tuple[str, str
     return out
 
 
-def entry_tier(command: str, source: str | None) -> str:
-    """'headline' for the annotation's/README's example, 'tests' for a test suite."""
+def follows_through(last: dict, action: str) -> bool:
+    """Is this patch a repair of the regressed spec (keep it) rather than a new
+    idea for the best one (roll back)? See the rollback comment in `cmd_patch`."""
+    return last.get("reached") == "L0" and action == "ADD_APT_PKG"
+
+
+def entry_tier(command: str, source: str | None, examples: list[dict] | None = None,
+               code_path: str = "/model") -> str:
+    """'headline' for the annotation's/README's example, 'tests' for a test
+    suite, 'helper' for a maintenance script the agent moved to. Only headline
+    is the repo's example; the other two prove the image and nothing more."""
     if not command:
         return "none"
     if _TESTS_CMD.search(command) or is_test_runner(command) or re.search(r"(^|[\s/])tests?/", command):
         return "tests"
+    # Only an agent's own choice is second-guessed: the annotation is human-reviewed.
+    if source == "agent" and examples_mod.helper_reason(command, examples or [], code_path):
+        return "helper"
     return "headline"
 
 
@@ -1304,6 +1316,17 @@ def cmd_patch(args, cfg) -> None:
             die(f"SET_ENTRYPOINT refused: {why}", code=3,
                 examples=[e["command"] for e in (state.get("examples") or [])[:10]],
                 discarded={"action": args.action, "arg": args.arg})
+        # Refused, not merely down-tiered: a `verified` verdict on a linter is
+        # a false claim however it is labelled, and the attempt it would spend
+        # is better left for an honest close.
+        why = examples_mod.helper_reason(args.arg or "", state.get("examples") or [],
+                                         state["spec"]["mount"]["code_path"])
+        if why:
+            die(f"SET_ENTRYPOINT refused: {why}. A script that exits 0 without running the "
+                f"model verifies nothing. Repair the documented example, pick another "
+                f"documented example, or close the job with what blocks it.", code=3,
+                examples=[e["command"] for e in (state.get("examples") or [])[:10]],
+                discarded={"action": args.action, "arg": args.arg})
         if int(state.get("entrypoint_changes") or 0) >= 2:
             die("SET_ENTRYPOINT refused: two entry-point changes already made in this job. "
                 "Close with --status failed (ENTRYPOINT_UNKNOWN); the findings and the "
@@ -1320,7 +1343,15 @@ def cmd_patch(args, cfg) -> None:
     best = state.get("best") or {}
     # Retain best-so-far: a repair that lowered the rung is discarded, and the
     # action that lowered it is forbidden, so the loop cannot re-walk it.
-    if best.get("spec") and ladder_mod.rung_index(last.get("reached") or "") \
+    #
+    # Except when the build itself broke and this repair is a system package:
+    # an apt package can only supply what that build lacked, so it is a repair
+    # OF the regressed spec and means nothing on the best one. Rolling back
+    # there re-opens the failure the discarded action fixed and leaves that
+    # action forbidden -- viva-membrane-actin, aks-noise-8, 3 of 3 trials:
+    # ADD_PKG pbg_mem3dg (L2) -> no C++ compiler (L0) -> rollback + g++ ->
+    # pbg_mem3dg missing again, nothing left to try.
+    if best.get("spec") and not follows_through(last, args.action) and ladder_mod.rung_index(last.get("reached") or "") \
             < ladder_mod.rung_index(best.get("rung") or ""):
         spec = EnvSpec.from_dict(best["spec"])
         rollback = f"regressed to {last.get('reached')}; rolled back to best {best['rung']}"
@@ -1531,7 +1562,8 @@ def _write_verdict(cfg, state, status: str, reason: str) -> dict:
         # suite the agent fell back to (`pytest`, `testthat::test_local()`,
         # `make test`). A verified-on-tests job proves the environment, not the
         # example; the scorer reports the two separately (hold-out 5: viva-yalla).
-        "entrypoint_tier": entry_tier(state.get("command") or "", state.get("entrypoint_source")),
+        "entrypoint_tier": entry_tier(state.get("command") or "", state.get("entrypoint_source"),
+                                      state.get("examples"), state["spec"]["mount"]["code_path"]),
         "annotation_findings": state.get("annotation_findings") or [],
         "annotation_corrections": finalize_corrections(state),
         "spec_source": state.get("spec_source", "evidence"),

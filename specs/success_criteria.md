@@ -185,6 +185,16 @@ repo's example. The verdict records `entrypoint_tier`; the scorer reports
 these as `verified_tests`, outside build success, unless the ground truth's
 `example` is the tests or `alternate_example_ok: true` is set by a human.
 
+## A maintenance script is not the example either
+
+`python scripts/lint-workspace.py` exits 0 and runs no model. `SET_ENTRYPOINT`
+to a script under `scripts/`, or one named for maintenance (lint, setup,
+deploy, …), is refused unless the root README presents that exact command
+(`examples.helper_reason`). If the documented example cannot be made to run,
+the honest close is `escalated` or `failed` with what blocks it. The verdict
+tier `helper` exists for rows that got through; the scorer never counts it
+(aks-noise-8: two such `verified` verdicts).
+
 ## A command with no script is still an entry point
 
 `pytest`, `Rscript -e '…'`, `make test`, `julia -e '…'` name no file for the L2

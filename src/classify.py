@@ -534,10 +534,15 @@ def _rules():
         ("no_matching_dist", re.compile(r"No matching distribution found for (\S+)"),
          no_matching_dist),
         # rustc's wording for the same fact: "error: linker `cc` not found"
-        # (maturin builds of viva-cpm and viva-biofilm, aks-rerun-7).
+        # (maturin builds of viva-cpm and viva-biofilm, aks-rerun-7). CMake's:
+        # "CMAKE_CXX_COMPILER not set" / "No CMAKE_C_COMPILER could be found"
+        # (pymem3dg under scikit-build-core, viva-membrane-actin, aks-noise-8 x3:
+        # it fell to `compile_failed` and the model had to find the compiler).
         ("no_compiler", re.compile(r"(?:unable to execute '(?:gcc|cc|g\+\+)'|"
                                    r"(?:gcc|cc|g\+\+): (?:command )?not found|"
-                                   r"linker `(?:cc|gcc)` not found)"),
+                                   r"linker `(?:cc|gcc)` not found|"
+                                   r"CMAKE_C(?:XX)?_COMPILER (?:not set|could be found)|"
+                                   r"No CMAKE_C(?:XX)?_COMPILER could be found)"),
          simple("COMPILE_ERROR", "ADD_APT_PKG", "build-essential")),
         # A build hook that shells out to npm (vivarium-workbench's loom bundle:
         # viva-simbio and viva-membrane-actin, aks-rerun-7 -- both got past L0 on

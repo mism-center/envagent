@@ -21,7 +21,7 @@ attempt record.
 | `NPM_INSTALL_DIR` | `/usr/local/lib/python3.12/site-packages/pkg/node_bridge` | `npm install` in that directory after the package step, at build time (adds `nodejs npm git`); for a package that would otherwise fetch its npm dependencies at run time |
 | `FIX_MOUNT_CONTRACT` | `extra_path=/model/src`, `workdir=/model/sim`, `output_path=/model/out`, `writable_copy=true` | `mount.<field>`; `extra_path` appends, everything else replaces |
 | `SET_L3_TIMEOUT` | `1200` | `l3_timeout_s` (run-time field; the image is unchanged). Only for the example killed at the **L3** deadline; the driver caps at `l3_timeout_max_s`; a passing run then proposes `expected_runtime_s` to the annotation |
-| `SET_ENTRYPOINT` | `python examples/run.py --steps 10` | the job's L2/L3 command (and `entrypoint`); must be grounded in `evidence.examples` or an existing script; max two per job; recorded as an annotation correction |
+| `SET_ENTRYPOINT` | `python examples/run.py --steps 10` | the job's L2/L3 command (and `entrypoint`); must be grounded in `evidence.examples` or an existing script, and must run the model: a maintenance script (`scripts/…`, lint/setup/deploy names) is refused unless the root README presents it; max two per job; recorded as an annotation correction |
 | `ESCALATE` | — | no spec change; close the job |
 
 ## Rules the driver enforces for you

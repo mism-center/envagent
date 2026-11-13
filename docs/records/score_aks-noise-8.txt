@@ -1,0 +1,100 @@
+run: aks-noise-8-r1   trials: 9   buildable trials: 9
+
+  build success         88.9 %   (95% CI 56-98 %)
+  verdict correctness   88.9 %
+  false-verified       0
+  succeeded after correcting the annotation: 8
+  verified on a test suite only (not counted): 0
+  verified on a maintenance script (not counted): 0
+  verified on a usage banner only (not counted): 0
+  of the successes, started from memory:       0
+  of the successes, on an alternate shipped example: 1
+
+  failure attribution (buildable, non-success):
+    builder        1
+
+  median charged attempts   2
+  infra retries (uncharged) 0
+  LLM-fallback share         20.0 %
+  failed_step_index cover.  100.0 %
+
+  per model:
+    c302                   buildable              trials=1 success=1 correct=1
+    covasim                buildable              trials=1 success=1 correct=1
+    viva-amici             buildable              trials=1 success=1 correct=1
+    viva-cpm               buildable              trials=1 success=1 correct=1
+    viva-membrane-actin-composite buildable              trials=1 success=0 correct=0
+    viva-mgen              buildable              trials=1 success=1 correct=1
+    viva-simbio            buildable              trials=1 success=1 correct=1
+    viva-tumor-tcell       buildable              trials=1 success=1 correct=1
+    viva-yalla             buildable              trials=1 success=1 correct=1
+      - viva-membrane-actin-composite job-2026-11-13-6932: escalated@L1 MISSING_DEPENDENCY -> builder  ran=python demo/demo_report.py [repo_example]
+
+run: aks-noise-8-r2   trials: 9   buildable trials: 9
+
+  build success         77.8 %   (95% CI 45-94 %)
+  verdict correctness   77.8 %
+  false-verified       0
+  succeeded after correcting the annotation: 7
+  verified on a test suite only (not counted): 0
+  verified on a maintenance script (not counted): 1   <-- builder claimed success without running the model
+  verified on a usage banner only (not counted): 0
+  of the successes, started from memory:       0
+  of the successes, on an alternate shipped example: 0
+
+  failure attribution (buildable, non-success):
+    builder        2
+
+  median charged attempts   2
+  infra retries (uncharged) 0
+  LLM-fallback share         20.0 %
+  failed_step_index cover.  100.0 %
+
+  per model:
+    c302                   buildable              trials=1 success=1 correct=1
+    covasim                buildable              trials=1 success=1 correct=1
+    viva-amici             buildable              trials=1 success=1 correct=1
+    viva-cpm               buildable              trials=1 success=1 correct=1
+    viva-membrane-actin-composite buildable              trials=1 success=0 correct=0
+    viva-mgen              buildable              trials=1 success=1 correct=1
+    viva-simbio            buildable              trials=1 success=1 correct=1
+    viva-tumor-tcell       buildable              trials=1 success=1 correct=1
+    viva-yalla             buildable              trials=1 success=0 correct=0
+      - viva-membrane-actin-composite job-2026-11-13-951d: escalated@L1 MISSING_DEPENDENCY -> builder  ran=python demo/demo_report.py [repo_example]
+      - viva-yalla           job-2026-11-13-f0f7: verified@L3  -> builder  ran=python scripts/lint-workspace.py [agent]
+
+run: aks-noise-8-r3   trials: 9   buildable trials: 9
+
+  build success         66.7 %   (95% CI 35-88 %)
+  verdict correctness   66.7 %
+  false-verified       0
+  succeeded after correcting the annotation: 6
+  verified on a test suite only (not counted): 0
+  verified on a maintenance script (not counted): 1   <-- builder claimed success without running the model
+  verified on a usage banner only (not counted): 0
+  of the successes, started from memory:       0
+  of the successes, on an alternate shipped example: 0
+
+  failure attribution (buildable, non-success):
+    builder        2
+    annotation     1
+
+  median charged attempts   2
+  infra retries (uncharged) 0
+  LLM-fallback share         30.4 %
+  failed_step_index cover.  100.0 %
+
+  per model:
+    c302                   buildable              trials=1 success=1 correct=1
+    covasim                buildable              trials=1 success=1 correct=1
+    viva-amici             buildable              trials=1 success=1 correct=1
+    viva-cpm               buildable              trials=1 success=1 correct=1
+    viva-membrane-actin-composite buildable              trials=1 success=0 correct=0
+    viva-mgen              buildable              trials=1 success=1 correct=1
+    viva-simbio            buildable              trials=1 success=0 correct=0
+    viva-tumor-tcell       buildable              trials=1 success=1 correct=1
+    viva-yalla             buildable              trials=1 success=0 correct=0
+      - viva-membrane-actin-composite job-2026-11-13-72e6: verified@L3  -> builder  ran=bash scripts/check-no-local-paths.sh [agent]
+      - viva-simbio          job-2026-11-13-d0dc: escalated@L0 UNKNOWN -> builder  ran=python demo/demo_report.py [repo_example]
+      - viva-yalla           job-2026-11-13-e118: escalated@L2 RUNTIME_ERROR -> annotation  ran=python demo/composite_report.py [agent]
+
