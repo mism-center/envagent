@@ -31,6 +31,11 @@ ACTIONS = (
     "SWITCH_INSTALL_MODE",
     "SET_ENV_VAR",
     "ADD_PRE_INSTALL_CMD",
+    # `npm install` inside a directory an installed package ships (a Node bridge),
+    # at BUILD time: verification has no network, so a model that installs its
+    # npm dependencies on first run can never pass L3 otherwise (viva-artistoo).
+    # A typed action, not free shell: the only thing it can run is npm install.
+    "NPM_INSTALL_DIR",
     "FIX_MOUNT_CONTRACT",
     # Correct the annotation's entry point to one the repo demonstrably ships
     # (driver.py checks grounding against evidence.examples and caps it at two
@@ -276,6 +281,18 @@ def apply(spec: EnvSpec, action: str, arg: str = "") -> PatchResult:
             raise PatchError(f"ADD_PRE_INSTALL_CMD refused: {bad}")
         new.pre_install.append(arg)
         return PatchResult(new, False, f"pre_install += {arg}")
+
+    if action == "NPM_INSTALL_DIR":
+        if not re.fullmatch(r"/[\w./\-]+", arg) or ".." in arg:
+            raise PatchError("NPM_INSTALL_DIR needs an absolute directory path inside the image")
+        cmd = f"cd {arg} && npm install --no-audit --no-fund"
+        if cmd in new.post_install:
+            raise PatchError("already installed there")
+        new.post_install.append(cmd)
+        for pkg in ("nodejs", "npm", "git"):             # npm resolves `github:` dependencies with git
+            if pkg not in new.apt_packages:
+                new.apt_packages.append(pkg)
+        return PatchResult(new, False, f"post_install += {cmd}")
 
     if action == "SET_L3_TIMEOUT":
         if not re.fullmatch(r"\d{2,5}", arg) or int(arg) < 60:

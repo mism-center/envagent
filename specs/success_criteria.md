@@ -168,6 +168,15 @@ runs clean counts as verified (`alternate_example_ok` in the ground truth
 confirms it per model; the scorer flags unconfirmed ones). A *test suite*
 never counts as the example.
 
+## README code blocks and vignettes are the example (decision 2026-11-13)
+
+When a repo documents no script, what its README shows in python code blocks,
+or what an R package's vignettes run, is the example. `init` offers each as a
+fixed command that executes the text exactly as shipped from the mounted repo
+(`examples.README_PY`; `knitr::purl` + `source` for `vignettes/*.Rmd`). They
+are `headline` entries. A documented script still outranks them, and they
+outrank the test suite.
+
 ## A test suite is not the example
 
 A verification whose entry is a test suite the agent fell back to (`pytest`,

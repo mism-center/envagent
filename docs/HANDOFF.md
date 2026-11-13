@@ -69,7 +69,11 @@ work continues from the records rather than from memory. `STATE.md` is the narra
   **never** counts as the example — reported as `verified_tests`.
 - **Rules**: deterministic code extracts facts and enforces constraints; the model judges intent; the corpus decides
   which patterns become rules. Do not add a rule from one observation (the `tesbml` pin was added from one and disproved).
-- **Not built, by decision**: Node runtime, headless Chrome, run-time egress, conda-style R names — honest escalations.
+- **Decisions 13 Nov 2026 (user)**: (1) README code blocks and R vignettes **are** the repo's example — run verbatim
+  (`examples.README_PY`, `knitr::purl` + `source`); a test suite still never counts. (2) Headless Chrome is an ordinary
+  apt package (`chromium`). (3) Node/npm are ordinary apt packages at any rung; npm dependencies are installed at
+  build time (`NPM_INSTALL_DIR`), never fetched at run time.
+- **Not built, by decision**: run-time egress, conda-style R names — honest escalations.
 
 ## 4. Conventions that bit us
 

@@ -62,7 +62,26 @@ _REL_FILE = re.compile(r"""['"]((?![/~$]|[A-Za-z]:)[\w][\w./\-]*\.(?:%s))['"]"""
 
 EXAMPLE_DIRS = ("examples", "example", "demo", "demos", "scripts", "inst/examples",
                 "inst/scripts", "vignettes", "notebooks", "tutorials")
-AUTO_DIRS = ("examples", "example", "demo", "demos", "inst", "tutorials")
+AUTO_DIRS = ("examples", "example", "demo", "demos", "inst", "tutorials", "vignettes")
+
+# Decision 2026-11-13: what a README shows in code blocks, and what an R
+# package's vignettes run, ARE the repo's example -- they are what the author
+# tells a reader to type. Neither is a script on disk, so each gets a fixed
+# command that runs the text exactly as shipped, read from the mounted repo:
+#   - README: every ```py/```python block, in order, as one program. No
+#     backticks or backslashes in the command (chr(96), chr(10)) so it survives
+#     shlex and a pod arg list unchanged.
+#   - vignette: knitr::purl extracts the chunks, source() runs them.
+# ponytail: blocks are concatenated -- right for a README that is one session
+# or independent snippets, wrong for one that shows alternatives; and purl runs
+# from the repo root, not vignettes/. Split per block / setwd when a repo needs it.
+README_PY = ("python -c \"import re,pathlib;exec(compile(chr(10).join(re.findall(chr(96)*3+'(?:py|python)[^'+chr(10)+']*'"
+             "+chr(10)+'(.*?)'+chr(96)*3,pathlib.Path('README.md').read_text(),re.S)),'README.md','exec'))\"")
+_PY_FENCE = re.compile(r"```(?:py|python)[^\n]*\n(.*?)```", re.S)
+
+
+def vignette_command(path: str) -> str:
+    return f"Rscript -e 'source(knitr::purl(\"{path}\", output = tempfile(fileext = \".R\"), quiet = TRUE), echo = TRUE)'"
 _MAX_EXAMPLES = 40
 
 
@@ -133,6 +152,10 @@ def _from_layout(root: Path, files: list[str]) -> list[dict]:
                         "file": parts, "placeholders": False})
         elif p.suffix == ".jl":
             out.append({"command": f"julia {parts}", "source": parts.split("/")[0], "tier": _tier(parts, parts),
+                        "file": parts, "placeholders": False})
+        elif p.suffix == ".Rmd" and parts.startswith("vignettes/") and not p.name.startswith("_") \
+                and re.fullmatch(r"[\w./\-]+", parts):
+            out.append({"command": vignette_command(parts), "source": "vignettes", "tier": _tier(parts, parts),
                         "file": parts, "placeholders": False})
     return out
 
@@ -236,6 +259,9 @@ def discover(root: str | Path, files: list[str], ci: list[dict] | None = None,
             text = _read(root / name)
             readme += text
             found += _from_readme(root, text, name)
+            # After the README's own commands: a documented script outranks the snippet.
+            if name == "README.md" and any(re.search(r"^\s*(?:import|from)\s+\w", b, re.M) for b in _PY_FENCE.findall(text)):
+                found.append({"command": README_PY, "source": name, "tier": "smoke", "file": None, "placeholders": False})
     found += _from_tests(root, files, readme)
     found += _from_layout(root, files)
     found += _from_ci(ci or [], files)

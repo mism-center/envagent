@@ -542,12 +542,22 @@ def _rules():
         # A build hook that shells out to npm (vivarium-workbench's loom bundle:
         # viva-simbio and viva-membrane-actin, aks-rerun-7 -- both got past L0 on
         # exactly this repair, after the model spent 1-3 attempts finding it).
-        # L0 only: at L3 the same words mean the MODEL needs Node at run time,
-        # which is a design item (no run-time egress for `npm install`), not a
-        # build tool to add.
-        ("no_npm", re.compile(r"npm not found on PATH|npm: (?:command )?not found"),
-         lambda m, c: Classification("COMPILE_ERROR", action="ADD_APT_PKG", arg="nodejs npm",
-                                     evidence=m.group(0)) if c.get("rung") == "L0" else None),
+        # Decision 2026-11-13: Node is an ordinary system package at every rung
+        # (a model that drives Node at run time gets it too: viva-artistoo).
+        # What it must not do is fetch at run time -- see `npm_install_dir`.
+        ("npm_install_dir",
+         re.compile(r"run `npm install` in (/[\w./\-]+)"),
+         lambda m, _c: Classification("MISSING_DEPENDENCY", action="NPM_INSTALL_DIR", arg=m.group(1).rstrip("."),
+                                      evidence=m.group(0))),
+        ("no_npm", re.compile(r"npm`? (?:was )?not found on PATH|npm: (?:command )?not found|"
+                              r"`?node`? (?:was )?not found on PATH|node: (?:command )?not found"),
+         simple("MISSING_SYSTEM_LIB", "ADD_APT_PKG", "nodejs npm")),
+        # Decision 2026-11-13: headless Chrome is an ordinary system package.
+        # plotly's static export (Kaleido >= 1) drives a browser; Debian's is
+        # `chromium` (viva-biofilm, at L3 in two runs). If Kaleido still cannot
+        # find it, SET_ENV_VAR BROWSER_PATH=/usr/bin/chromium.
+        ("kaleido_chrome", re.compile(r"Kaleido requires Google Chrome|plotly_get_chrome"),
+         simple("MISSING_SYSTEM_LIB", "ADD_APT_PKG", "chromium")),
         ("no_cmake", re.compile(r"cmake: (?:command )?not found|CMake must be installed"),
          simple("COMPILE_ERROR", "ADD_APT_PKG", "cmake")),
         ("compile_failed", re.compile(r"error: command '.*(?:gcc|g\+\+|cc1plus|clang)'.* failed|"

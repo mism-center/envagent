@@ -369,6 +369,7 @@ def _a_coverage():
             "CHANGE_BASE_IMAGE": "ubuntu:24.04", "SWITCH_INSTALLER": "renv", "REMOVE_PKG": "numpy",
             "SWITCH_INSTALL_MODE": "installed", "SET_ENV_VAR": "A=b",
             "ADD_PRE_INSTALL_CMD": "echo x", "FIX_MOUNT_CONTRACT": "workdir=/w",
+            "NPM_INSTALL_DIR": "/usr/local/lib/python3.12/site-packages/pkg/node_bridge",
             "SET_ENTRYPOINT": "python run.py --steps 10", "SET_L3_TIMEOUT": "1200", "ESCALATE": ""}
     assert set(args) == set(patch.ACTIONS)
     import dataclasses as _dc
@@ -2495,14 +2496,60 @@ def _l_key_lines():
     got = logs.key_lines(text)
     assert got[0].startswith("CMake Error") and got[-1].startswith("ERROR: Could not build") and len(got) == 2, got
 
-@check("rules from aks-rerun-7: rustc's missing linker is the missing compiler; a build hook without npm gets nodejs+npm at L0 only (at L3 it is a Node-runtime model, a design item)")
+@check("rules from aks-rerun-7: rustc's missing linker is the missing compiler; a build hook without npm gets nodejs+npm")
 def _c_rerun7_rules():
     c = classify.classify("error: linker `cc` not found\n  = note: No such file or directory (os error 2)", rung="L0")
     assert (c.failure_class, c.action, c.arg, c.rule) == ("COMPILE_ERROR", "ADD_APT_PKG", "build-essential", "no_compiler"), c
     hook = "RuntimeError: loom bundle not built \u2014 npm not found on PATH.\nerror: metadata-generation-failed"
     c = classify.classify(hook, rung="L0")
     assert (c.action, c.arg, c.rule) == ("ADD_APT_PKG", "nodejs npm", "no_npm"), c
-    assert classify.classify("sh: 1: npm: not found", rung="L3", exit_code=1).rule != "no_npm"
+
+@check("policy 13 Nov: Node and headless Chrome are ordinary system packages; npm dependencies are baked at build time, never fetched at run time (viva-artistoo, viva-biofilm)")
+def _c_policy_node_chrome():
+    c = classify.classify("pbg_artistoo.runtime.NodeUnavailableError: Node.js is required to run Artistoo but `node` was not found on PATH.", rung="L3", exit_code=1)
+    assert (c.action, c.arg, c.rule) == ("ADD_APT_PKG", "nodejs npm", "no_npm"), c
+    msg = ("`npm` was not found on PATH to install it. Install Node.js/npm, then run `npm install` in "
+           "/usr/local/lib/python3.11/site-packages/pbg_artistoo/node_bridge.")
+    c = classify.classify(msg, rung="L3", exit_code=1)
+    assert (c.action, c.arg) == ("NPM_INSTALL_DIR", "/usr/local/lib/python3.11/site-packages/pbg_artistoo/node_bridge"), c
+    after = patch.apply(spec(), c.action, c.arg).spec
+    text = render(after).text
+    assert "npm install --no-audit --no-fund" in text and {"nodejs", "npm", "git"} <= set(after.apt_packages), text
+    assert text.index("kind=pkg") < text.index("npm install") if "kind=pkg" in text else True
+    for bad in ("relative/dir", "/a/../etc", "/x; rm -rf /"):
+        try:
+            patch.apply(spec(), "NPM_INSTALL_DIR", bad)
+        except patch.PatchError:
+            continue
+        raise AssertionError(f"NPM_INSTALL_DIR accepted {bad!r}")
+    c = classify.classify("ValueError: \nKaleido requires Google Chrome to be installed.\n    $ plotly_get_chrome", rung="L3", exit_code=1)
+    assert (c.action, c.arg, c.rule) == ("ADD_APT_PKG", "chromium", "kaleido_chrome"), c
+
+@check("policy 13 Nov: README python blocks and R vignettes are the repo's example -- run verbatim from the mounted repo, chosen over the test suite, never over a documented script")
+def _x_readme_and_vignettes():
+    import examples as _ex, subprocess as _sp, shlex as _sh
+    fence = "`" * 3
+    readme = f"# pkg\n{fence}sh\npip install pkg\n{fence}\n{fence}py\nimport json\nx = 2\n{fence}\ntext\n{fence}python\nprint('README_RAN', x + 1)\n{fence}\n{fence}R\nlibrary(pkg)\n{fence}\n"
+    root = _repo({"README.md": readme, "pkg/__init__.py": "", "tests/test_a.py": "def test_a(): pass\n"})
+    ex = _ex.discover(root, ["README.md", "pkg/__init__.py", "tests/test_a.py"])
+    assert ex[0]["command"] == _ex.README_PY and _ex.auto_choosable(ex[0]), ex
+    assert _ex.is_command(_ex.README_PY) and _ex.grounded(root, _ex.README_PY, ex) is None
+    out = _sp.run(_sh.split(_ex.README_PY.replace("python", sys.executable, 1)), cwd=root, capture_output=True, text=True)
+    assert out.returncode == 0 and "README_RAN 3" in out.stdout, out                   # both blocks, in order, one program
+    cmd, src, _ = driver.choose_entry({}, {"examples": ex}, [])
+    assert cmd == _ex.README_PY and driver.entry_tier(cmd, src) == "headline", (cmd, src)
+    root2 = _repo({"README.md": readme + f"{fence}sh\npython demo/run.py\n{fence}\n", "demo/run.py": "print(1)\n"})
+    ex2 = _ex.discover(root2, ["README.md", "demo/run.py"])
+    assert driver.choose_entry({}, {"examples": ex2}, [])[0] == "python demo/run.py", ex2  # a documented script still wins
+    r = _repo({"DESCRIPTION": "Package: p\nSuggests: knitr, dplyr\n", "NAMESPACE": "", "vignettes/p.Rmd": "x", "vignettes/_child.Rmd": "x",
+               "tests/testthat/test-a.R": "x", "tests/testthat.R": "x"})
+    exr = _ex.discover(r, ["DESCRIPTION", "vignettes/p.Rmd", "vignettes/_child.Rmd", "tests/testthat/test-a.R", "tests/testthat.R"])
+    vig = _ex.vignette_command("vignettes/p.Rmd")
+    assert [e["command"] for e in exr if e["source"] == "vignettes"] == [vig], exr
+    assert driver.choose_entry({}, {"examples": exr}, [])[0] == vig and driver.entry_tier(vig, "repo_example") == "headline"
+    assert ladder.entry_from_command(vig)["kind"] == "none" and _sh.split(vig)[:2] == ["Rscript", "-e"]
+    need = dict(driver.runner_deps(vig, "renv", {"r": {"suggests": ["dplyr"]}}))
+    assert "knitr" in need and "dplyr" in need, need
 
 @check("driver: ADD_PKG of a name the repo declares from git installs that git source, not the same-named index project (aks-rerun-7: viva-membrane-actin's optional pbg-mem3dg)")
 def _d_add_pkg_declared_source():

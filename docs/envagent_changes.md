@@ -710,6 +710,17 @@ states and for guesses the index could have refused. 206 checks.
 
 These change what an attempt costs, so attempt counts are not comparable with passes 1–6.
 
+**rev 4.19 (13 Nov), three policy decisions by the user** (208 checks; not in an image):
+
+- **README code blocks and R vignettes are examples** (`src/examples.py`): a root README with python blocks yields one
+  fixed command that runs those blocks, in order, read from the mounted repo; each `vignettes/*.Rmd` yields
+  `knitr::purl` + `source`. Both are `headline`, chosen over the test suite and never over a documented script.
+  A vignette entry adds `knitr` and the package's Suggests. starsim, epidemics and epimodel now get a real entry.
+- **Chrome** (`kaleido_chrome` rule): `Kaleido requires Google Chrome` → `ADD_APT_PKG chromium`.
+- **Node** (`no_npm` at every rung; new action `NPM_INSTALL_DIR`): a package that would `npm install` its bridge on
+  first run gets that done at build time. The action can only run `npm install` in a validated absolute path.
+- Ground truth: five repos are in scope again (14 of 19); viva-biofilm's example is its README study run, not `pytest`.
+
 Observed, not yet acted on (one observation each, or a design decision): `compile_failed` proposes `PIN_PKG` with no
 version and the model invents one (viva-amici `1.6.2`, viva-simbio `0.0.66`); R `Remotes:`; `cannot import name` from a lock-pinned package → unpin to the
 declared range; extras-only git dependencies in the draft; README `make test` with no Makefile; apt on a non-root

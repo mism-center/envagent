@@ -178,7 +178,6 @@ models:
     design_item: M1 (git deps) -- now rendered; sim extras need pymem3dg/readdy compiled backends
   viva-artistoo:
     buildable: true
-    scope: 'policy:needs a Node runtime and npm install at run time (no egress)'
     language: python
     example: python demo/demo_report.py
     example_full: null
@@ -243,9 +242,8 @@ models:
     notes: AMICI compiles ODE models with a C++ toolchain at run time — build-deps family
   viva-biofilm:
     buildable: true
-    scope: 'policy:Kaleido needs headless Chrome'
     language: html
-    example: pytest -q
+    example: python workspace/studies/spatial-biofilm-growth/run_study.py
     example_full: null
     workdir: null
     timeout_s: 900
@@ -275,7 +273,6 @@ models:
       expected in the annotation-less pass'
   starsim:
     buildable: true
-    scope: 'policy:tests only (README code blocks are not counted)'
     language: python
     example: null
     example_full: null
@@ -311,7 +308,6 @@ models:
     design_item: M7 run-time download, no egress
   epimodel:
     buildable: true
-    scope: 'policy:tests only (vignettes are not counted)'
     language: r
     example: null
     example_full: null
@@ -329,7 +325,6 @@ models:
     design_item: M6 R compile budget -- now P3M binaries; may verify
   epidemics:
     buildable: true
-    scope: 'policy:tests only (vignettes are not counted)'
     language: r
     example: null
     example_full: null

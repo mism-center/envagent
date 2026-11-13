@@ -18,6 +18,7 @@ attempt record.
 | `SWITCH_INSTALL_MODE` | `installed` | `install_mode` |
 | `SET_ENV_VAR` | `PYTHONPATH=/model/src` | `env_vars[k] = v` |
 | `ADD_PRE_INSTALL_CMD` | a shell line | append to `pre_install` |
+| `NPM_INSTALL_DIR` | `/usr/local/lib/python3.12/site-packages/pkg/node_bridge` | `npm install` in that directory after the package step, at build time (adds `nodejs npm git`); for a package that would otherwise fetch its npm dependencies at run time |
 | `FIX_MOUNT_CONTRACT` | `extra_path=/model/src`, `workdir=/model/sim`, `output_path=/model/out`, `writable_copy=true` | `mount.<field>`; `extra_path` appends, everything else replaces |
 | `SET_L3_TIMEOUT` | `1200` | `l3_timeout_s` (run-time field; the image is unchanged). Only for the example killed at the **L3** deadline; the driver caps at `l3_timeout_max_s`; a passing run then proposes `expected_runtime_s` to the annotation |
 | `SET_ENTRYPOINT` | `python examples/run.py --steps 10` | the job's L2/L3 command (and `entrypoint`); must be grounded in `evidence.examples` or an existing script; max two per job; recorded as an annotation correction |

@@ -653,6 +653,10 @@ def runner_deps(command: str, pkg_manager: str, ev: dict) -> list[tuple[str, str
                 out.append((s, "entry: DESCRIPTION Suggests (test entry)"))
         if "devtools::" in c:
             out.append(("devtools", "entry: devtools runner"))
+        if "knitr::purl" in c:
+            out.append(("knitr", "entry: vignette runner"))
+            for s in (ev.get("r") or {}).get("suggests") or []:
+                out.append((s, "entry: DESCRIPTION Suggests (vignette entry)"))
     return out
 
 
