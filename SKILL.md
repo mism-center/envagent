@@ -133,13 +133,32 @@ envbuild spec --job-id "$JOB" --set-spec /tmp/spec.json
 You emit a structured object, never Dockerfile text. If the draft is already
 right, install it unchanged and say so — do not churn it to look busy.
 
-### Step 3 — Attempt
+### Step 3 — Rehearse live, then attempt
 
 ```bash
-envbuild attempt --job-id "$JOB"
+envbuild attempt --job-id "$JOB" --live     # rehearsal: scratch container, not charged
+envbuild attempt --job-id "$JOB"            # the clean build the verdict rests on
 ```
 
-Exit 0 means verified through L3. Non-zero means read the result:
+**Search with `--live`.** It runs the same steps and the same ladder inside one
+scratch container kept for the job, and re-runs only the steps a repair changed
+— a round is seconds to a few minutes instead of a full image build, and it
+costs no attempt. Loop `--live` → `patch` (Step 4) → `--live` until it reaches
+L3 or stops making progress.
+
+**Then run the clean `attempt`.** A live pass is a rehearsal, not a result: the
+container has the network on and carries everything earlier rounds installed.
+Only the clean attempt (fresh image, network-denied ladder) can be `verified`;
+the driver refuses a `verified` verdict without one. If the clean attempt fails
+where the rehearsal passed, that difference is the finding — repair it and
+attempt again (charged). If `--live` is refused or unavailable, use plain
+`attempt`; nothing else changes.
+
+Do not spend the live rounds to avoid closing: when the documented example
+cannot run for a reason no typed action fixes, close with that reason.
+
+Exit 0 means L3 was reached (rehearsed, with `--live`; verified, without).
+Non-zero means read the result:
 
 - `failed_rung` — where it broke (`L0` build, `L1` image, `L2` mount, `L3` run)
 - `failed_step` — index, kind and **EnvSpec field** of the failing instruction
@@ -159,7 +178,8 @@ envbuild patch --job-id "$JOB" --action ADD_APT_PKG --arg libxml2-dev \
                --why "the apt step could not find libxml/parser.h"
 ```
 
-Then go back to Step 3. **One action per attempt** — the driver refuses a second
+Then go back to Step 3 (`--live` while searching). **One action per attempt or
+live round** — the driver refuses a second
 patch and logs the discard. The driver also enforces forbidden-triple rejection
 and best-so-far rollback; when it rejects something, that is information, not an
 obstacle to route around.

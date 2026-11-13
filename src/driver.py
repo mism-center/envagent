@@ -69,6 +69,7 @@ import builder as builder_mod                        # noqa: E402
 from errors import InfraError                        # noqa: E402
 from envspec import EnvSpec, MountContract, render   # noqa: E402
 import k8s                                           # noqa: E402
+import live as live_mod                              # noqa: E402
 from verifier import K8sVerifier                     # noqa: E402
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -296,6 +297,18 @@ def make_verifier(cfg, state) -> K8sVerifier:
         docker_config_secret=cfg.get("builder", "docker_config_secret"),
         memory=cfg.get("verifier", "memory") or None,
     )
+
+
+def make_live(cfg, state) -> "live_mod.LiveSession":
+    """The job's scratch container (live.py). Its session record lives in the
+    job state, because every CLI call is a new process."""
+    return live_mod.LiveSession(
+        job_id=state["job_id"], client=make_client(cfg, state),
+        live=state.setdefault("live", {}),
+        work_pvc=cfg.get("builder", "work_pvc"), work_mount=cfg.get("builder", "work_mount"),
+        models_pvc=cfg.get("builder", "models_pvc"), models_mount=cfg.get("builder", "models_mount"),
+        code_ref=state["repo"],
+        resources=builder_mod.resources_from_config(cfg, "builder", builder_mod.BUILD_RESOURCES))
 
 
 # ---------------------------------------------------------------- init
@@ -1091,6 +1104,14 @@ def _finish_budget(cfg, state, reason: str) -> None:
     die(reason, code=5, job_id=state["job_id"], verdict="budget_exhausted")
 
 
+def _live_unavailable(cfg, state, exc: Exception) -> None:
+    """The scratch container is a convenience. Losing it must not close the
+    job the way a failed build substrate does: the clean path still works."""
+    save_state(cfg, state)
+    die(f"the live container is unavailable ({exc}). Nothing was charged. Continue with "
+        f"`envbuild attempt --job-id {state['job_id']}` (a clean build), or retry --live once.", code=3)
+
+
 def cmd_attempt(args, cfg) -> None:
     state = load_state(cfg, args.job_id)
     blocked = _budget_check(cfg, state)
@@ -1103,10 +1124,22 @@ def cmd_attempt(args, cfg) -> None:
         _die_infra(cfg, state, exc)
 
     spec = EnvSpec.from_dict(state["spec"])
-    state["attempt"] += 1
+    # --live: the same build-and-climb, against the job's scratch container
+    # (live.py). It is a rehearsal: not an attempt, not charged, no image, and
+    # never the basis of a verdict. Only its wall clock is spent.
+    live = bool(getattr(args, "live", False))
+    if live:
+        max_live = cfg.getint("budgets", "max_live_rounds", fallback=20)
+        if int(state.get("live_rounds") or 0) >= max_live:
+            die(f"live rounds exhausted ({max_live}). Run `envbuild attempt --job-id "
+                f"{state['job_id']}` on the spec as it stands, or close the job.", code=3)
+        state["live_rounds"] = int(state.get("live_rounds") or 0) + 1
+        builder = verifier = make_live(cfg, state).climb_with(spec)
+    else:
+        state["attempt"] += 1
+        builder, verifier = make_builder(cfg, state), make_verifier(cfg, state)
     attempt_no = state["attempt"]
     started = time.time()
-    builder, verifier = make_builder(cfg, state), make_verifier(cfg, state)
 
     # ---- L0 -----------------------------------------------------------
     # The build context is a path, not a tar: the build pod mounts the same
@@ -1114,9 +1147,12 @@ def cmd_attempt(args, cfg) -> None:
     try:
         build = builder.build(spec, state["repo"], build_timeout_s(cfg, spec))
     except InfraError as exc:
+        if live:
+            _live_unavailable(cfg, state, exc)
         state["attempt"] -= 1                 # the attempt never happened
         _die_infra(cfg, state, exc)
-    (job_dir(cfg, state["job_id"]) / f"Dockerfile.a{attempt_no}").write_text(build.dockerfile)
+    (job_dir(cfg, state["job_id"]) / (f"Dockerfile.live{state['live_rounds']}" if live
+                                      else f"Dockerfile.a{attempt_no}")).write_text(build.dockerfile)
 
     lad = ladder_mod.LadderResult(reached="L0" if build.ok else "L0")
     rung_failed, stderr, exit_code = "L0", build.stderr, None
@@ -1140,6 +1176,8 @@ def cmd_attempt(args, cfg) -> None:
         except InfraError as exc:
             # This is what turned a working L0 into an `UNKNOWN` corpus row: the
             # substrate was unreachable, which says nothing about the model.
+            if live:
+                _live_unavailable(cfg, state, exc)
             state["attempt"] -= 1
             _die_infra(cfg, state, exc)
         except (RuntimeError, ValueError) as exc:
@@ -1187,7 +1225,7 @@ def cmd_attempt(args, cfg) -> None:
     # What the image actually contains, read by the L1 probe from inside it.
     # The spec pins the base; this pins everything above it, and it is what a
     # `verified` verdict refers to.
-    lock = (lad.notes or {}).get("lockfile") if build.ok else None
+    lock = (lad.notes or {}).get("lockfile") if build.ok and not live else None
     if lock:
         (job_dir(cfg, state["job_id"]) / f"lockfile.a{attempt_no}.txt").write_text(
             f"# {lock['format']} {lock['sha256']}\n" + "\n".join(lock["entries"]) + "\n")
@@ -1239,11 +1277,19 @@ def cmd_attempt(args, cfg) -> None:
         "charged": not infra,
         "run": run_provenance(cfg),
     }
-    record.append_attempt(cfg.get("paths", "outputs"), row)
+    if live:
+        # Kept beside the job, out of attempts.jsonl: that corpus is one row
+        # per image build, and every reader of it (score, reclassify, memory)
+        # counts rows as builds.
+        with (job_dir(cfg, state["job_id"]) / "live.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({**row, "live_round": state["live_rounds"],
+                                 "steps_run": build.vertices_total, "steps_reused": build.cache_hits}) + "\n")
+    else:
+        record.append_attempt(cfg.get("paths", "outputs"), row)
 
     if build.ok and (lad.notes or {}).get("l3_seconds"):
         state["l3_seconds"] = float(state.get("l3_seconds") or 0.0) + float(lad.notes["l3_seconds"])
-        if ok and spec.l3_timeout_s:
+        if ok and spec.l3_timeout_s and not live:
             # The example needed more than the smoke budget and then passed:
             # the annotation should say how long it runs. Measured, not guessed.
             observed = int(lad.notes["l3_seconds"])
@@ -1254,7 +1300,9 @@ def cmd_attempt(args, cfg) -> None:
                 "applied_by": "patch", "outcome": "verified"})
 
     # ---- infra plane -----------------------------------------------------
-    if infra:
+    # (A live round that hits the substrate is simply re-run: it was never
+    # charged, so there is no retry budget to keep.)
+    if infra and not live:
         state["infra_retries"] = int(state.get("infra_retries") or 0) + 1
         state["infra_seconds"] = float(state.get("infra_seconds") or 0.0) + duration
         state["last"] = {"attempt": attempt_no, "reached": reached, "ok": False,
@@ -1284,17 +1332,20 @@ def cmd_attempt(args, cfg) -> None:
         sys.exit(3)
 
     # ---- best-so-far ----------------------------------------------------
+    # A live round has no image, so it can never be the best: `best` is what
+    # the verdict reports and what a rollback restores.
     best = state["best"]
-    if ladder_mod.rung_index(reached) > ladder_mod.rung_index(best.get("rung") or ""):
+    if not live and ladder_mod.rung_index(reached) > ladder_mod.rung_index(best.get("rung") or ""):
         state["best"] = {"rung": reached, "spec": spec.to_dict(),
                          "image_ref": build.image_ref, "image_digest": build.image_digest,
                          "lockfile_sha256": lock["sha256"] if lock else None}
     state["last"] = {"attempt": attempt_no, "reached": reached, "ok": ok,
                      "failure_class": cls.failure_class if cls else None,
                      "failed_rung": None if ok else rung_failed,
-                     "image_ref": build.image_ref, "image_digest": build.image_digest}
+                     "image_ref": build.image_ref, "image_digest": build.image_digest, "live": live}
     state["patched_since_attempt"] = False
-    resolve_corrections(state, reached, ok, cls.failure_class if cls else None)
+    if not live:
+        resolve_corrections(state, reached, ok, cls.failure_class if cls else None)
     save_state(cfg, state)
 
     out = {
@@ -1317,7 +1368,15 @@ def cmd_attempt(args, cfg) -> None:
         "attempts_left": cfg.getint("budgets", "max_attempts") - charged_attempts(state),
         "seconds_left": round(cfg.getfloat("budgets", "wall_clock_s") - budget_elapsed(state)),
     }
-    if ok:
+    if live:
+        out.update({"live": True, "live_round": state["live_rounds"], "charged": False,
+                    "steps_run": build.vertices_total, "steps_reused": build.cache_hits,
+                    "live_rounds_left": max_live - state["live_rounds"]})
+    if ok and live:
+        out["next"] = ("The scratch container passes L3. That is a rehearsal, not a result: run "
+                       f"`envbuild attempt --job-id {state['job_id']}` now for the clean build "
+                       "and the network-denied ladder the verdict rests on.")
+    elif ok:
         out["next"] = ("Verified through L3. Close the job with "
                        f"`envbuild verdict --job-id {state['job_id']} --status verified`.")
     else:
@@ -1331,6 +1390,8 @@ def cmd_attempt(args, cfg) -> None:
         elif cls.routes_to == "retry":
             out["next"] = ("Rule matched the class but not an argument. Read "
                            "specs/repair.md and choose one typed action.")
+        elif cls.routes_to == "infra":
+            out["next"] = "The substrate failed, not the spec. Re-run the same command."
         elif cls.routes_to == "llm":
             out["next"] = ("No rule matched -- classify per specs/failure_taxonomy.md and "
                            "repair per specs/repair.md, then `envbuild patch ... "
@@ -1417,7 +1478,7 @@ def cmd_patch(args, cfg) -> None:
     # action forbidden -- viva-membrane-actin, aks-noise-8, 3 of 3 trials:
     # ADD_PKG pbg_mem3dg (L2) -> no C++ compiler (L0) -> rollback + g++ ->
     # pbg_mem3dg missing again, nothing left to try.
-    if best.get("spec") and not follows_through(last, args.action) and ladder_mod.rung_index(last.get("reached") or "") \
+    if best.get("spec") and not last.get("live") and not follows_through(last, args.action) and ladder_mod.rung_index(last.get("reached") or "") \
             < ladder_mod.rung_index(best.get("rung") or ""):
         spec = EnvSpec.from_dict(best["spec"])
         rollback = f"regressed to {last.get('reached')}; rolled back to best {best['rung']}"
@@ -1504,9 +1565,14 @@ def _backfill_action(cfg, state, action: dict) -> None:
     and join at analysis time instead.
     """
     path = Path(cfg.get("paths", "outputs")) / "attempts.jsonl"
+    live = bool((state.get("last") or {}).get("live"))
+    if live:
+        # The repair answers a live round: it belongs on that row, not on the
+        # last image build's.
+        path = job_dir(cfg, state["job_id"]) / "live.jsonl"
     rows = record.read_jsonl(path)
     for row in reversed(rows):
-        if row["job_id"] == state["job_id"] and row["attempt"] == state["attempt"]:
+        if live or (row["job_id"] == state["job_id"] and row["attempt"] == state["attempt"]):
             row["action_taken"] = action
             if action.get("classified_by"):
                 row["classified_by"] = action["classified_by"]
@@ -1646,6 +1712,13 @@ def _write_verdict(cfg, state, status: str, reason: str) -> dict:
     written = record.write_verdict(cfg.get("paths", "outputs"), row)
     if status == "verified":
         memory_mod.remember(cfg.get("paths", "outputs"), state, row)
+    if (state.get("live") or {}).get("pod"):
+        # Every exit path writes a verdict, so this is where the scratch
+        # container ends. Best effort: its own deadline ends it otherwise.
+        try:
+            make_live(cfg, state).stop()
+        except InfraError:
+            pass
     state["closed"] = True
     save_state(cfg, state)
     return written
@@ -1664,6 +1737,11 @@ def cmd_verdict(args, cfg) -> None:
             f"{last.get('failure_class')} at {last.get('failed_rung')}, which is the model's or the "
             f"spec's result. Use --status failed (the example did not pass) or escalated "
             f"(no typed repair applies).", code=3)
+    if args.status == "verified" and not already and (last.get("live") or not last.get("ok")
+                                                      or not (state.get("best") or {}).get("image_digest")):
+        die("status 'verified' needs a clean attempt that passed L3: the last run was "
+            + ("a live rehearsal" if last.get("live") else "not a pass")
+            + f". Run `envbuild attempt --job-id {state['job_id']}` first.", code=3)
     try:
         row = _write_verdict(cfg, state, args.status, args.reason or "") if not already else None
     finally:
@@ -1739,6 +1817,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("attempt", help="build, push and climb the ladder once")
     s.add_argument("--job-id", required=True)
     s.add_argument("--start", default="L1", choices=("L1", "L2"))
+    s.add_argument("--live", action="store_true",
+                   help="rehearse in the job's scratch container: seconds per round, not charged, never a verdict")
     s.set_defaults(fn=cmd_attempt)
 
     s = sub.add_parser("patch", help="apply exactly one typed remediation action")

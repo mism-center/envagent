@@ -2869,6 +2869,57 @@ def _resolve_first():
     finally:
         resolve._uv = old
 
+@check("live: the scratch pod holds no credential and uses no exec; a step that succeeded is not re-run; a new base starts a new pod; a run carries the image ENV and the mounts")
+def _live_session():
+    import tempfile, live as _live
+    from envspec import EnvSpec, MountContract
+    class C(FakeClient):
+        def get_pod(self, name): return {"status": {"phase": "Running"}}
+    with tempfile.TemporaryDirectory() as d:
+        work, models = Path(d) / "work", Path(d) / "models"
+        (models / "bench-x" / "1.0").mkdir(parents=True)
+        c, st = C(), {}
+        s = _live.LiveSession("job-x", c, st, "wpvc", str(work), "mpvc", str(models), str(models / "bench-x" / "1.0"))
+        ran, fail = [], {"needle": None}
+        def fake_exec(script, timeout_s):
+            ran.append(script)
+            bad = fail["needle"] and fail["needle"] in script
+            return (1, "E: Unable to locate package nope", 1.0) if bad else (0, "", 1.0)
+        s._exec = fake_exec
+        dg = "sha256:" + "a" * 64
+        spec = EnvSpec(base_image="python:3.12-slim", base_digest=dg, apt_packages=["git"], pkg_specs=["numpy"],
+                       env_vars={"FOO": "bar baz"}, mount=MountContract(workdir="/model/demo"))
+        b = s.build(spec, "", 600)
+        assert b.ok and b.image_ref == "live" and b.vertices_total == len(ran) >= 4, (b, len(ran))
+        m = c.created[0]; ps = m["spec"]; ct = ps["containers"][0]
+        assert ps["automountServiceAccountToken"] is False and "imagePullSecrets" not in ps and ps["activeDeadlineSeconds"] > 0
+        assert len(ps["containers"]) == 1 and "initContainers" not in ps
+        assert all("secret" not in v for v in ps["volumes"]), ps["volumes"]
+        assert ct["image"] == f"python:3.12-slim@{dg}" and ct["securityContext"]["allowPrivilegeEscalation"] is False
+        src = [v for v in ct["volumeMounts"] if v["name"] == "models"][0]
+        assert src["readOnly"] is True and src["subPath"] == "bench-x/1.0" and src["mountPath"] == "/envbuild-src"
+        # a repair that adds one apt package re-runs the apt step and nothing else
+        n0 = len(ran); spec.apt_packages = ["git", "g++"]
+        b = s.build(spec, "", 600)
+        assert b.ok and len(ran) == n0 + 1 and "g++" in ran[-1] and b.cache_hits >= 3, (len(ran) - n0, b)
+        # a failing step is reported against its spec field and is retried next round
+        spec.apt_packages = ["git", "g++", "nope"]; fail["needle"] = "nope"
+        b = s.build(spec, "", 600)
+        assert not b.ok and (b.failed_step_kind, b.failed_step_field) == ("apt", "apt_packages") and "Unable to locate" in b.stderr, b
+        fail["needle"] = None; n0 = len(ran)
+        assert s.build(spec, "", 600).ok and len(ran) == n0 + 1
+        # ladder runs: image ENV, per-run env, mounts as links, workdir, the command
+        r = s.climb_with(spec).run("live", "/x", ["python", "demo.py", "a b"], spec.mount, 60, env={"ENVBUILD_X": "1"})
+        sc = ran[-1]
+        assert r.ok and "export FOO='bar baz'" in sc and "export ENVBUILD_X=1" in sc and "cd /model/demo" in sc, sc
+        assert "ln -s /envbuild-src /model" in sc and "ln -s /envbuild-io/outputs /outputs" in sc and "python demo.py 'a b'" in sc, sc
+        # installed mode copies the source instead of linking it; the changed key starts a new pod
+        spec.install_mode = "installed"
+        assert s.build(spec, "", 600).ok and len(c.created) == 2 and c.deleted == [m["metadata"]["name"]]
+        assert any("cp -a /envbuild-src/. /model/" in x for x in ran) and "ln -s /envbuild-src" not in ran[-1]
+        s.cleanup("job-x")
+        assert len(c.deleted) == 2 and st["pod"] is None
+
 # ---------------------------------------------------------------- report
 if __name__ == "__main__":
     for line in PASSED:
