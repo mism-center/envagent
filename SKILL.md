@@ -259,6 +259,14 @@ Read on demand, not up front:
   `envbuild versions --job-id <id> --pkg name` (free, no attempt): it lists what
   the index offers this job's interpreter and the newest version per interpreter.
   A pin the index does not have is refused without charge.
+- **The resolver has already looked.** `init` resolves the draft against the
+  index before you see it: it may have moved the interpreter
+  (`interpreter_from_resolution`), added the toolchain for a package with no
+  wheel (`source_build_expected`), or dropped a name the index does not have
+  (`requirement_not_on_index`). `unresolvable_requirements` in the findings
+  means the draft is proven uninstallable: fix `pkg_specs` with `envbuild spec`
+  before the first attempt. A `spec` or `patch` that makes the requirements
+  provably unresolvable is refused without charge, with the resolver's reason.
 - **Read `error_lines` before `stderr_tail`.** The attempt result carries the
   failure-naming lines of the *whole* log; the tail is often only pip's summary
   ("Failed to build X") with the cause hundreds of lines above it.

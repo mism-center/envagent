@@ -63,6 +63,7 @@ import memory as memory_mod                          # noqa: E402
 import normalize                                     # noqa: E402
 import patch as patch_mod                            # noqa: E402
 import record                                        # noqa: E402
+import resolve as resolve_mod                        # noqa: E402
 from builder import K8sBuilder                      # noqa: E402
 import builder as builder_mod                        # noqa: E402
 from errors import InfraError                        # noqa: E402
@@ -660,6 +661,61 @@ def runner_deps(command: str, pkg_manager: str, ev: dict) -> list[tuple[str, str
     return out
 
 
+def resolve_first(spec: EnvSpec, requires_python: str | None, findings: list[dict]) -> EnvSpec:
+    """Ask the resolver what a build would otherwise have to discover (see
+    resolve.py): move the draft to an interpreter its requirements resolve on,
+    add the toolchain when a requirement ships no wheel, and say so when no
+    interpreter resolves. pip on a python:* base only; anything else is
+    returned untouched."""
+    py = _spec_python(spec)
+    if spec.pkg_manager != "pip" or not py:
+        return spec
+    others = [v for v in reversed(classify_mod.py_satisfying(requires_python or "")) if v != py]
+    for _ in range(4):
+        best, res = resolve_mod.best_python(spec.pkg_specs, [py] + others)
+        # A direct requirement with no release at all on the index (covasim
+        # lists the stdlib's `distutils`; one attempt per trial, 3 of 3) can
+        # not be installed by anyone: the `no_matching_dist` repair, for free.
+        gone = re.search(r"there are no versions of (\S+) and you require \1\b", res["problem"] or "")
+        if not gone:
+            break
+        spec.pkg_specs = [s for s in spec.pkg_specs
+                          if resolve_mod._key(resolve_mod._NAME.match(s).group(1)) != resolve_mod._key(gone.group(1))]
+        findings.append({"code": "requirement_not_on_index", "entry": None, "suggestion": None,
+                         "detail": f"{gone.group(1)} has no release on the index and was left out of pkg_specs"})
+    if best and best != py:
+        spec = patch_mod.apply(spec, "CHANGE_INTERPRETER_VERSION", best).spec
+        findings.append({"code": "interpreter_from_resolution", "entry": None, "suggestion": best,
+                         "detail": f"the requirements do not resolve cleanly on Python {py}; they do on {best}"})
+    if res["needs_build"] and "build-essential" not in spec.apt_packages:
+        spec.apt_packages = sorted(set(spec.apt_packages) | {"build-essential"})
+        findings.append({"code": "source_build_expected", "entry": None, "suggestion": "build-essential",
+                         "detail": "no wheel on the index for this interpreter, so pip will compile: "
+                                   + ", ".join(res["needs_build"]) + "; build-essential added"})
+    if res["ok"] is False:
+        findings.append({"code": "unresolvable_requirements", "entry": None, "suggestion": None,
+                         "detail": "the resolver proves these requirements cannot be installed together on any "
+                                   "candidate interpreter; fix pkg_specs before the first attempt: " + res["problem"]})
+    return spec
+
+
+def resolution_refusal(before: EnvSpec, after: EnvSpec) -> str | None:
+    """Why a spec change must not be built, or None. Only a change that turns
+    a resolvable (or unknown) requirement set into a proven-unresolvable one is
+    refused: a spec that was already broken may still need this repair."""
+    py = _spec_python(after)
+    if after.pkg_manager != "pip" or not py or \
+            (after.pkg_specs == before.pkg_specs and after.base_image == before.base_image):
+        return None
+    res = resolve_mod.check(after.pkg_specs, py)
+    if res["ok"] is not False:
+        return None
+    pb = _spec_python(before)
+    if before.pkg_manager == "pip" and pb and resolve_mod.check(before.pkg_specs, pb)["ok"] is False:
+        return None
+    return res["problem"]
+
+
 def follows_through(last: dict, action: str) -> bool:
     """Is this patch a repair of the regressed spec (keep it) rather than a new
     idea for the best one (roll back)? See the rollback comment in `cmd_patch`."""
@@ -825,6 +881,13 @@ def cmd_init(args, cfg) -> None:
             draft_spec.pkg_origin[re.sub(r"[-_.]+", "-", dep).lower()] = origin
             findings.append({"code": "runner_dependency_added", "entry": command, "suggestion": dep,
                              "detail": f"{dep} added to pkg_specs: {origin}"})
+    if spec_source == "evidence":
+        spec = resolve_first(spec, (ev.get("python") or {}).get("requires_python"), findings)
+        if not spec.base_digest:
+            try:
+                spec.base_digest = digest = baseselect.resolve_digest(spec.base_image)
+            except RuntimeError as exc:
+                die(str(exc), code=4)
     # A script that opens files relative to its own directory needs that
     # directory as workdir. Derivable here, so derive it here -- circadian-clock
     # spent four jobs rediscovering this at L3.
@@ -935,6 +998,9 @@ def cmd_spec(args, cfg) -> None:
         except RuntimeError as exc:
             die(str(exc), code=4)
     spec.builder_version = builder_id(cfg)
+    why = resolution_refusal(EnvSpec.from_dict(state["spec"]), spec)
+    if why:
+        die(f"spec refused, nothing was changed: its requirements cannot be resolved. {why}", code=3)
     old = render(EnvSpec.from_dict(state["spec"])).text
     state["spec"] = spec.to_dict()
     state["patched_since_attempt"] = True
@@ -1378,6 +1444,13 @@ def cmd_patch(args, cfg) -> None:
     except patch_mod.PatchError as exc:
         die(str(exc), code=3)
 
+    # The general form of the pin refusal above: a repair that makes the
+    # requirements provably unresolvable is not worth a build to find out.
+    why = resolution_refusal(spec, result.spec)
+    if why:
+        die(f"{args.action} refused: with it the requirements cannot be resolved. Nothing was "
+            f"changed and no attempt was charged. {why}", code=3,
+            discarded={"action": args.action, "arg": args.arg})
     if result.needs_digest:
         try:
             result.spec.base_digest = baseselect.resolve_digest(result.spec.base_image)

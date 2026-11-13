@@ -33,6 +33,8 @@ import baseselect                                     # noqa: E402
 import classify                                       # noqa: E402
 import driver                                         # noqa: E402
 driver._pypi_json = lambda _name: None                # the suite is offline: the index has no opinion
+import resolve                                        # noqa: E402
+resolve._uv = lambda _reqs, _py: (-1, "offline")     # ...and neither has the resolver
 import evidence                                       # noqa: E402
 import ladder                                         # noqa: E402
 import normalize                                      # noqa: E402
@@ -2822,6 +2824,50 @@ def _d_choose_script_over_tests():
     assert cmd2 == "pytest"
     assert driver.is_test_runner("Rscript -e 'testthat::test_local()'") and driver.is_test_runner("python -m pytest -q") and not driver.is_test_runner("python run.py tests/data.csv")
     assert driver.entry_tier("python -m pytest", "repo_example") == "tests" and driver.entry_tier("python run.py", "annotation") == "headline"
+
+@check("resolve: a proof of no-solution refuses, a missing wheel adds the toolchain, anything else is no opinion; git lines are never resolved")
+def _resolve_first():
+    from envspec import EnvSpec
+    NOVER = "  × No solution found when resolving dependencies:\n  ╰─▶ Because there is no version of amici==1.6.2 and you require\n      amici==1.6.2, we can conclude that your requirements are unsatisfiable.\n"
+    NOWHEEL = ("  × No solution found when resolving dependencies:\n  ╰─▶ Because all versions of amici have no usable wheels and you require\n      amici, we can conclude\n\n"
+               "hint: Wheels are required for `amici` because building from source is disabled for all packages (i.e., with `--no-build`)\n")
+    seen = []
+    def run(reqs, py):
+        seen.append((list(reqs), py))
+        if any(r.startswith("amici==1.6.2") for r in reqs): return 1, NOVER
+        if any(r.startswith("amici") for r in reqs): return 1, NOWHEEL
+        if "old-only" in reqs and py != "3.10": return 1, NOVER.replace("amici==1.6.2", "old-only")
+        if "distutils" in reqs: return 1, "No solution found when resolving dependencies: Because there are no versions of distutils and you require distutils, we can conclude"
+        return 0, ""
+    r = resolve.check(["amici==1.6.2", "numpy"], "3.11", run)
+    assert r["ok"] is False and "no version of amici==1.6.2" in r["problem"] and "×" not in r["problem"], r
+    r = resolve.check(["amici", "numpy", "wb @ git+https://github.com/x/wb@abc", "-e .", "/model"], "3.11", run)
+    assert r == {"ok": True, "needs_build": ["amici"], "problem": None}, r
+    assert all("git+" not in x and x not in ("-e .", "/model") for reqs, _ in seen for x in reqs), seen
+    assert resolve.check(["numpy"], "3.11", lambda *_: (2, "error: network unreachable"))["ok"] is None
+    assert resolve.check(["numpy"], "3.11")["ok"] is None                      # the suite's offline stub
+    assert resolve.best_python(["old-only"], ["3.12", "3.11", "3.10"], run)[0] == "3.10"
+    # driver: the draft moves interpreter, gains the toolchain, and reports an unresolvable set
+    old = resolve._uv
+    try:
+        resolve._uv = run
+        f = []
+        sp = driver.resolve_first(EnvSpec(base_image="python:3.12-slim", base_digest="sha256:" + "a" * 64, pkg_specs=["old-only", "amici"]), ">=3.10", f)
+        assert sp.base_image == "python:3.10-slim" and sp.base_digest == "" and "build-essential" in sp.apt_packages, sp
+        assert {x["code"] for x in f} == {"interpreter_from_resolution", "source_build_expected"}, f
+        f = []
+        sp = driver.resolve_first(EnvSpec(base_image="python:3.13-slim", base_digest="", pkg_specs=["distutils", "numpy"]), None, f)
+        assert sp.pkg_specs == ["numpy"] and [x["code"] for x in f] == ["requirement_not_on_index"], (sp.pkg_specs, f)
+        ok = EnvSpec(base_image="python:3.11-slim", base_digest="", pkg_specs=["numpy"])
+        bad = EnvSpec(base_image="python:3.11-slim", base_digest="", pkg_specs=["numpy", "amici==1.6.2"])
+        assert "amici==1.6.2" in driver.resolution_refusal(ok, bad)
+        assert driver.resolution_refusal(bad, bad) is None                      # nothing about packages changed
+        worse = EnvSpec(base_image="python:3.11-slim", base_digest="", pkg_specs=["amici==1.6.2"])
+        assert driver.resolution_refusal(bad, worse) is None                    # already broken: do not block the repair
+        conda = EnvSpec(base_image="mambaorg/micromamba:1.5", base_digest="", pkg_manager="conda", pkg_specs=["amici==1.6.2"])
+        assert driver.resolution_refusal(ok, conda) is None
+    finally:
+        resolve._uv = old
 
 # ---------------------------------------------------------------- report
 if __name__ == "__main__":
