@@ -1,0 +1,4 @@
+# Everything here runs in Linux containers: a CRLF shebang or entrypoint is a
+# broken pass (aks-holdout-7 resume: `/usr/bin/env: bash\r`). LF in every
+# working tree, whatever core.autocrlf says.
+* text=auto eol=lf
