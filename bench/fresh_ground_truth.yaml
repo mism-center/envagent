@@ -1,0 +1,360 @@
+# Pre-registered ground truth for bench/fresh_manifest.yaml. Written from each README at its
+# pinned sha by a reviewer that had not seen the agent run on any of these repos (2026-11-23),
+# before any pass. Edit only to correct a fact about a repo, never in response to a run.
+# Score with: uv run scripts/score.py A V --run-id R --ground-truth bench/fresh_ground_truth.yaml
+schema: envbuild-ground-truth/1
+models:
+  sbi4abm:
+    buildable: true
+    language: python
+    example: python sbi4abm/utils/job_script.py --task hop --method maf_rgcn --outloc /outputs --nsims 1000
+    example_full: null
+    workdir: sbi4abm/utils
+    timeout_s: 1800
+    expected_outputs: []
+    human_verified: false
+    source: README.md
+    fresh: true
+    repo: https://github.com/joelnmdyer/sbi4abm
+    sha: e83b77df5dc7d4e65b11cfe6a8ea765b9a492416
+    notes: 'README "Example usage": cd sbi4abm/utils, run job_script.py for the Hopfield ABM with a MAF + recurrent-GCN density
+      estimator on 1000 simulations; the `--outloc <location_to_save_output>` placeholder is filled with /outputs. The script
+      imports `sbi4abm.*` (including the vendored, modified `sbi`), so the package must be installed; needs CPU torch>=1.8,
+      torch_geometric==2.3 (hard pin), pyknos, pyro-ppl, POT, numba. Data ships in sbi4abm/data. Timeout is an estimate (CPU
+      neural-SBI training); README gives none.'
+  cbmpy:
+    buildable: true
+    language: python
+    example: README_PY
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: README.md
+    fresh: true
+    repo: https://github.com/SystemsBioinformatics/cbmpy
+    sha: 91992c815605fd711dd06f4f98386fd7757e7f25
+    notes: 'The only runnable thing the README shows is the "Check the basic installation" block: load the bundled `cbmpy_test_core`
+      model and run FBA. That block''s fence has no language tag (a bare ```), so an extractor that only reads ```py/```python
+      fences finds nothing. The same code as one command is `python -c "import cbmpy; cmod = cbmpy.readSBML3FBC(''cbmpy_test_core'');
+      cbmpy.doFBA(cmod)"`. Needs python-libsbml and swiglpk (GLPK LP solver), numpy/scipy/sympy; developed on Python 3.10.
+      Harness note (2026-11-23, before any run): README_PY reads only tagged py/python fences, so the harness cannot offer
+      this block; a verified run of another shipped example scores as an alternate.'
+  gems:
+    buildable: true
+    scope: policy:the README julia blocks, run together, start with Pkg.add(url=github) and include Simulation(population="SH")
+      + gemsmap, which download the population zip (GitHub releases) and the BKG shapefile at run time
+    language: julia
+    example: README_JL
+    example_full: null
+    workdir: null
+    timeout_s: 1800
+    expected_outputs: []
+    human_verified: false
+    source: README.md
+    fresh: true
+    repo: https://github.com/IMMIDD/GEMS
+    sha: f42c7ae8d3accddb1b554eb6856c9f87466e01d9
+    notes: German Epidemic Microsimulation System (Julia ABM). On its own, the README's "Simulations" block (`Simulation();
+      run!(sim); ResultData(sim); gemsplot(...)`) uses a random population built on the fly and needs no network. It is the
+      in-scope smoke if blocks are ever run one at a time. Julia 1.11/1.12; heavy dependency stack (Plots, StatsPlots, GMT,
+      VideoIO, Weave, VegaLite), so precompile dominates time.
+  opqua:
+    buildable: true
+    language: python
+    example: python examples/tutorials/basic_example.py
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: README.md (Minimal example; shipped as examples/tutorials/basic_example.py)
+    fresh: true
+    repo: https://github.com/pablocarderam/opqua
+    sha: 38e8238b7191c3299e6792d3b55c8379b4de004c
+    notes: 'README "Usage" says to run models (including the examples/tutorials ones) with `python my_model.py`. Its "Minimal
+      example" is the code shipped as basic_example.py: a host-host SI model with 100 hosts. README_PY is not usable here
+      because the README has 56 ```python blocks, mostly API documentation. Writes Basic_example.csv/.png to the cwd, so it
+      needs a writable workdir. Dependencies: numpy, pandas, scipy, matplotlib, seaborn, textdistance, joblib, pyvis.'
+  bonesis:
+    buildable: true
+    language: python
+    example: python examples/minimal_trapspace.py
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: examples/ (README only links to the online docs)
+    fresh: true
+    repo: https://github.com/bnediction/bonesis
+    sha: 65419e0239693e03531f0dfd91beec76acbfb5ce
+    notes: 'Boolean-network synthesis with answer-set programming. The README documents nothing runnable. examples/ holds
+      17 small self-contained scripts and any of them is an equivalent smoke example; minimal_trapspace.py is the smallest.
+      Dependencies: clingo>=5.5 (PyPI wheels), mpbn, colomoto_jupyter, boolean.py, networkx, pandas.'
+  reina-model:
+    buildable: true
+    scope: policy:every run loads the Google COVID-19 Mobility Report zip and the THL vaccination CSV from datasets/, which
+      is not shipped and is filled by data_import/*.py over the network
+    language: python
+    example: python -m calc.simulation
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: README.md
+    fresh: true
+    repo: https://github.com/kausaltech/reina-model
+    sha: 18ce6e058b56225d42ad9362437377bc12675928
+    notes: 'COVID-19 agent-based model of a Finnish hospital district. get_active_interventions() always calls generate_mobility_ivs()
+      and generate_vaccination_ivs(), and both read files from datasets/. Old pinned stack: Python 3.7/3.8, numpy 1.20, numba
+      0.53, pandas 1.2, cython==3.0a6. cythonsim is compiled by pyximport at run time, so gcc must be in the runtime image.
+      Ships a Dockerfile (python:3.8).'
+  pasmopy:
+    buildable: true
+    language: python
+    example: README_PY
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: README.md
+    fresh: true
+    repo: https://github.com/pasmopy/pasmopy
+    sha: 91d85676a72c9768f1bcbc2edd83e7306afa5d47
+    notes: 'A single ```python block: Text2Model turns a Michaelis-Menten reaction text into a model package, then runs the
+      simulation. It writes michaelis_menten.txt and a generated michaelis_menten/ package into the cwd, then imports that
+      package, so it needs a writable cwd on sys.path. Dependencies: biomass>=0.10, numpy, scipy, pandas, seaborn, tqdm.'
+  sbmltoolkit-jl:
+    buildable: true
+    scope: policy:tests only; the README tutorial reads a placeholder my_model.xml the repo does not ship, and the only runnable
+      code is Pkg.test
+    language: julia
+    example: null
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: none (README blocks are a template on a nonexistent file)
+    fresh: true
+    repo: https://github.com/SciML/SBMLToolkit.jl
+    sha: 8eb1074d592d62f6938d2aa22f6a6795d36a8450
+    notes: SBML import into the SciML stack. The README julia blocks are Pkg.add("SBMLToolkit") (registry, network) followed
+      by readSBML("my_model.xml", ...) on a file that does not exist. The SBML fixtures are only in test/data, used by Pkg.test.
+      ENTRYPOINT_UNKNOWN is the honest outcome.
+  cleo:
+    buildable: true
+    scope: policy:no runnable example; the README is pip install plus a docs link, the tutorials are Jupyter notebooks, and
+      notebooks/*.py are marimo apps started with `marimo edit --sandbox`, which is interactive and fetches dependencies
+    language: python
+    example: null
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: none (README defers to online docs)
+    fresh: true
+    repo: https://github.com/siplab-gt/cleo
+    sha: 595fb7652f1d5c8bd32ac21c66db3f506368fc9b
+    notes: Closed-loop electrophysiology/optogenetics testbed on Brian 2 (PyPI name cleosim). docs/tutorials/*.ipynb are run
+      by the full test task (pytest with nbmake). notebooks/README warns that the manuscript notebooks are not guaranteed
+      to work with the current version. Apart from those, only the pytest suite runs.
+  biosimspace:
+    buildable: true
+    language: python
+    example: python demo/conversion.py --files demo/amber/ala/ala.crd demo/amber/ala/ala.top --format PDB
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: demo/conversion.py (README.rst shows only `import BioSimSpace as BSS` as an install check)
+    fresh: true
+    repo: https://github.com/OpenBioSim/biosimspace
+    sha: f678e14298541866178f5493885b20d3fdb1703c
+    notes: 'The demo/*.py scripts are BioSimSpace Gateway nodes exported from the demo notebooks. Run outside Jupyter, they
+      take their inputs as --flags. conversion.py is the one that needs no MD engine: it reads the shipped AMBER alanine files
+      and writes converted.pdb to the cwd, so the cwd must be writable. Conda-only stack: sire from the openbiosim channel
+      plus conda-forge (pixi.toml); not pip-installable.'
+  mepognn:
+    buildable: true
+    scope: policy:the documented command trains on a GPU (-GPU cuda:0); no CPU invocation is documented
+    language: python
+    example: python model/Main.py -GPU cuda:0 -graph Adaptive
+    example_full: null
+    workdir: model
+    timeout_s: 1800
+    expected_outputs: []
+    human_verified: false
+    source: README.md
+    fresh: true
+    repo: https://github.com/deepkashiwa20/MepoGNN
+    sha: 90099d7080b93a3d0177302371cb33da45772393
+    notes: Metapopulation SIR + GNN forecaster for Japanese prefectures. README says to cd into model/ (written as `cd /model`);
+      the defaults are -in ../data and -out ./output, which writes inside model/ and so needs a writable copy. Up to 300 epochs
+      with early stopping. PyTorch 1.9, numpy 1.19, Python 3.8. `-GPU cpu` would probably work, since the value goes straight
+      to .to(), but the README never documents it.
+  myokit:
+    buildable: true
+    language: python
+    example: python -m myokit run example
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: README.md
+    fresh: true
+    repo: https://github.com/myokit/myokit
+    sha: e5a4a791bcf09b1ee0f35e6036151d6dc2571478
+    notes: Cardiac electrophysiology. Runs the bundled example .mmt (model + protocol + embedded script) and compiles a C
+      simulation at run time, so the runtime image needs a C compiler and CVODES (sundials) headers and libraries. The README
+      warns that Ubuntu 26+ sundials packaging breaks the build ("mpi.h not found"), so use an older base or an older sundials.
+      GUI extras are not needed.
+  on-growth-and-form:
+    buildable: true
+    language: python
+    example: python src/wetware/render.py --edition phyllotaxis --duration 8
+    example_full: null
+    workdir: src/wetware
+    timeout_s: 1200
+    expected_outputs: []
+    human_verified: false
+    source: README.md
+    fresh: true
+    repo: https://github.com/paulina-duda/on-growth-and-form
+    sha: 434b6b062e5e2d738dc921ea39a2126ce70243c1
+    notes: 'First command in "Run them yourself": an inhibition-field phyllotaxis simulation rendered to an 8 s H.264 clip.
+      Writes mp4 + cover to <repo>/out (path derived from __file__), so it needs a writable copy. Needs an ffmpeg with libx264
+      on PATH (conda-forge gpl build or Debian ffmpeg; libopenh264-only builds fail mid-encode). Python 3.12, numpy, scipy,
+      pillow. `--preview` writes only the cover still (~1 s).'
+  brian2cuda:
+    buildable: true
+    scope: policy:needs an NVIDIA GPU and CUDA toolkit (nvcc); the cuda_standalone device generates and compiles CUDA code
+    language: python
+    example: python examples/cuba.py
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: examples/cuba.py (README defers to the online docs)
+    fresh: true
+    repo: https://github.com/brian-team/brian2cuda
+    sha: 1d7c25167a41ebb89f3b95e79e9f0e75daaabe1b
+    notes: The README's only python block imports brian2cuda and calls set_device("cuda_standalone"). It runs no simulation
+      and could exit 0 without a GPU, so it is not used as the example. cuba.py, the Brette et al. 2007 CUBA benchmark network,
+      is the smallest shipped example; it writes results/ and code/ to the cwd.
+  nanodna-nanorobot-simulation:
+    buildable: true
+    scope: policy:main.py imports nanorobot.py, which reads ../data/GCA_000001405.29/*_genomic.fna (the GRCh38 human genome,
+      ~3 GB) at import, and energy_management.py reads ../data/GCF_000001405.40/protein.faa; neither file ships (there is
+      no data/ dir)
+    language: python
+    example: python src/main.py
+    example_full: null
+    workdir: src
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: README.md
+    fresh: true
+    repo: https://github.com/CodeByPinar/nanoDNA-nanoROBOT-simulation
+    sha: 296ac0ab0c15a32d51b34f0dc944e4ee0a1f49a3
+    notes: 'README says to `pip install -r requirements.txt` (no such file exists) and run main.py "using Anaconda or Jupyter".
+      Even with the data, main() calls APIs that do not exist (Nanorobot() without its required position argument, set_initial_position,
+      dna_interaction.simulate_interaction), so the example is broken upstream. Inferred dependencies: numpy, pandas, matplotlib,
+      seaborn, scikit-learn.'
+  momentclosure-jl:
+    buildable: true
+    scope: policy:no runnable example; the README defers to online docs, examples/ holds only Jupyter notebooks (IJulia kernel),
+      and the only other runnable code is Pkg.test
+    language: julia
+    example: null
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: none (README has no code blocks besides the citation)
+    fresh: true
+    repo: https://github.com/SciML/MomentClosure.jl
+    sha: b3d05222b371d880f1f2a291f3e35f41bc791e6f
+    notes: Moment-closure approximations for reaction networks and SDEs. The examples/*.ipynb notebooks also use packages
+      outside Project.toml (Plots, Latexify, DifferentialEquations, StochasticDiffEq), and some are dev scratch (Brusselator-issues,
+      conditional_TEST_J). Julia >=1.10, Catalyst 16/17, ModelingToolkit 11.26.
+  py-mcmd:
+    buildable: true
+    scope: policy:drives external NAMD 2.14 (a registration-licensed binary) and GOMC binaries, expected at ../NAMD_2.14_Linux-x86_64-multicore
+      and ../GOMC/bin outside the repo; neither is a package
+    language: python
+    example: python -m py_mcmd.cli.main -f user_input_NAMD_GOMC.json
+    example_full: null
+    workdir: null
+    timeout_s: 1800
+    expected_outputs: []
+    human_verified: false
+    source: docs/quick_start.rst (README links to Read the Docs, built from docs/)
+    fresh: true
+    repo: https://github.com/GOMC-WSU/py-MCMD
+    sha: 9bccd1ca67be31a0d976bfedde7ddc40003e9f7c
+    notes: 'Hybrid MD/MC driver that alternates NAMD and GOMC runs: GEMC water at 350 K, 5 cycles of 1000 NAMD + 200 GOMC
+      steps. catdcd ships in required_data/bin. Running with `--dry_run` only generates inputs; it does not run the engines,
+      so it is not the model running. Environment: namd_gomc-env.yml.'
+  fly-brain:
+    buildable: true
+    language: python
+    example: python chat_with_fly.py --stim taste_sweet --duration 0.1 --pretty
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: README.md
+    fresh: true
+    repo: https://github.com/lixiang1076/fly-brain
+    sha: f6d525ab10c7a3ed4853d3d8b4b5e73f24cfe52b
+    notes: 'Brian2 (CPU) LIF simulation of the FlyWire v783 connectome (138,639 neurons, ~5M synapses). This is the README''s
+      first "Command-line mode" command; the "recommended" fly_chat.py reads stdin interactively. data/2025_Connectivity_783.parquet
+      (96 MB) is a Git LFS object, and the corpus checkout has it resolved (checked 2026-11-23: 100,804,642 bytes of parquet,
+      not a pointer). environment.yml pulls brian2cuda and torch cu126, but the CPU path needs only brian2, pandas and pyarrow.
+      README asks for >=8 GB RAM and says the first run spends 60-90 s compiling.'
+  pymanga:
+    buildable: true
+    language: python
+    example: python MANGA.py -i Benchmarks/ExampleSetups/FirstApplication/example_setup.xml
+    example_full: null
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: MANGA.py usage text + Benchmarks/ExampleSetups/FirstApplication (README links only to the external homepage)
+    fresh: true
+    repo: https://github.com/pymanga/pyMANGA
+    sha: ac88fb5def47cb8e43c5d5f6138c7ac817d3a5f5
+    notes: 'Mangrove/vegetation agent-based model: 10 Avicennia trees (Bettina growth, AsymmetricZOI + FixedSalinity), 500
+      steps, no visualisation. The XML''s output_dir is repo-root-relative (Benchmarks/ExampleSetups/FirstApplication/ModelOutput/),
+      so run from the repo root with a writable copy. Dependencies: numpy, lxml, pandas, matplotlib, scipy (vtk only for the
+      OGS setups).'
+  lad-seir-calibration:
+    buildable: true
+    language: r
+    example: vignette:vignettes/getting-started.Rmd
+    example_full: Rscript run_analysis.R
+    workdir: null
+    timeout_s: 900
+    expected_outputs: []
+    human_verified: false
+    source: vignettes/getting-started.Rmd (same code as the README "Example" r block)
+    fresh: true
+    repo: https://github.com/YisaAdeniyiAbolade/lad-seir-calibration
+    sha: 08a824c1e138596f10395f02199078210a2bfa20
+    notes: 'R package ladseir: fits a LAD time-varying SEIR model to bundled RAPIDD Ebola scenario 1, compares it with LSQ,
+      forecasts, and simulates. Needs R>=4.1 and deSolve, with knitr for purl, and the package installed from source. plot(fit)
+      writes Rplots.pdf to the cwd. run_analysis.R is the manuscript reproduction (60 conditions x 1000 replications, Slurm-scale),
+      so it is example_full only. scripts/validate_package.R is R CMD check, which is tests.'
