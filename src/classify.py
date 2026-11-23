@@ -293,6 +293,26 @@ def _rules():
         return Classification("MISSING_DEPENDENCY", action="ADD_PKG",
                               arg=MODULE_PYPI.get(mod, mod), evidence=m.group(0))
 
+    def cannot_import_name(m, ctx):
+        top = m.group(1).split(".")[0]
+        own = top in ctx.get("local_modules", ()) or top in ctx.get("source_tops", ())
+        if ctx.get("rung") in ("L2", "L3") and own:
+            # The repo's OWN package lacks the name. Pinning it to an index
+            # release (what this rule used to propose: pass 7, viva-mgen,
+            # `PIN_PKG viva_mgen==0.1.0`) installs someone else's copy of the
+            # model -- in mounted mode nothing reinstalls the repo's code over
+            # it, and the run verifies the wrong code.
+            if ctx.get("install_mode", "mounted") == "mounted" and "site-packages" in (m.group(2) or ""):
+                return Classification("IMPORT_PATH_ERROR", action="FIX_MOUNT_CONTRACT", arg=None,
+                                      evidence=f"{m.group(0)}: an installed copy of the repo's own {top} "
+                                               f"shadows the mounted source")
+            return Classification("RUNTIME_ERROR",
+                                  evidence=f"{m.group(0)}: {top} is the repo's own package and has no such name "
+                                           f"at this revision -- the example and the code disagree. Do not pin "
+                                           f"{top}; pick another documented example or close with this reason")
+        return Classification("ABI_MISMATCH", action="PIN_PKG", arg=MODULE_PYPI.get(top, top),
+                              evidence=m.group(0))
+
     def legacy_sdist(m, ctx):
         mod = m.group(1) or m.group(2)
         cur = ctx.get("python_version") or ""
@@ -598,10 +618,8 @@ def _rules():
                                      evidence=m.group(0)) if c.get("install_mode", "mounted") == "mounted"
          else Classification("RUNTIME_ERROR", evidence=m.group(0))),
         ("cannot_import_name",
-         re.compile(r"ImportError: cannot import name '\w+' from '([\w.]+)'"),
-         lambda m, _c: Classification("ABI_MISMATCH", action="PIN_PKG",
-                                      arg=MODULE_PYPI.get(m.group(1).split(".")[0], m.group(1).split(".")[0]),
-                                      evidence=m.group(0))),
+         re.compile(r"ImportError: cannot import name '\w+' from '([\w.]+)'(?: \(([^)]*)\))?"),
+         cannot_import_name),
         ("dist_not_installed",
          re.compile(r"PackageNotFoundError: distribution '([\w.\-]+)' is not installed"),
          lambda m, _c: Classification("MISSING_DEPENDENCY", action="ADD_PKG", arg=m.group(1),

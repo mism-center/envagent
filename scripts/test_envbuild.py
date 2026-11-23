@@ -2920,6 +2920,22 @@ def _live_session():
         s.cleanup("job-x")
         assert len(c.deleted) == 2 and st["pod"] is None
 
+@check("classify: `cannot import name` from the repo's own package is never a pin of that package (pass 7, viva-mgen: PIN_PKG viva_mgen==0.1.0)")
+def _c_cannot_import_own():
+    txt = "ImportError: cannot import name 'fig2_growth' from 'viva_mgen.composites' (/usr/local/lib/python3.11/site-packages/viva_mgen/composites/__init__.py)"
+    c = classify.classify(txt, rung="L3", local_modules=["viva_mgen"], install_mode="installed")
+    assert (c.failure_class, c.action, c.rule) == ("RUNTIME_ERROR", None, "cannot_import_name"), c
+    c = classify.classify(txt, rung="L3", source_tops=["viva_mgen"], install_mode="mounted")
+    assert (c.failure_class, c.action) == ("IMPORT_PATH_ERROR", "FIX_MOUNT_CONTRACT"), c
+    c = classify.classify(txt.replace("/usr/local/lib/python3.11/site-packages", "/model"), rung="L3",
+                          local_modules=["viva_mgen"], install_mode="mounted")
+    assert c.failure_class == "RUNTIME_ERROR" and c.action is None, c
+    # a dependency's missing name is still a pin of the dependency
+    c = classify.classify("ImportError: cannot import name 'composite_spec' from 'process_bigraph' (/usr/local/lib/python3.12/site-packages/process_bigraph/__init__.py)", rung="L2", local_modules=["viva_simbio"])
+    assert (c.failure_class, c.action) == ("ABI_MISMATCH", "PIN_PKG") and c.arg.replace("_", "-") == "process-bigraph", c
+    c = classify.classify(txt, rung="L1", local_modules=["viva_mgen"])
+    assert (c.failure_class, c.action) == ("ABI_MISMATCH", "PIN_PKG"), c        # L1: no code mounted, so it is a dependency
+
 # ---------------------------------------------------------------- report
 if __name__ == "__main__":
     for line in PASSED:
