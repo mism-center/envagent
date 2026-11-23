@@ -308,7 +308,8 @@ def make_live(cfg, state) -> "live_mod.LiveSession":
         work_pvc=cfg.get("builder", "work_pvc"), work_mount=cfg.get("builder", "work_mount"),
         models_pvc=cfg.get("builder", "models_pvc"), models_mount=cfg.get("builder", "models_mount"),
         code_ref=state["repo"],
-        resources=builder_mod.resources_from_config(cfg, "builder", builder_mod.BUILD_RESOURCES))
+        resources=builder_mod.resources_from_config(cfg, "builder", builder_mod.BUILD_RESOURCES),
+        pull_secret=cfg.get("builder", "docker_config_secret"))
 
 
 # ---------------------------------------------------------------- init

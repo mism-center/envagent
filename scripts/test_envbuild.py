@@ -2876,6 +2876,7 @@ def _resolve_first():
 @check("live: the scratch pod holds no credential and uses no exec; a step that succeeded is not re-run; a new base starts a new pod; a run carries the image ENV and the mounts")
 def _live_session():
     import tempfile, live as _live
+    _live.registry.image_shell = lambda ref: None             # offline: no registry
     from envspec import EnvSpec, MountContract
     class C(FakeClient):
         def get_pod(self, name): return {"status": {"phase": "Running"}}
@@ -2894,14 +2895,18 @@ def _live_session():
         spec = EnvSpec(base_image="python:3.12-slim", base_digest=dg, apt_packages=["git"], pkg_specs=["numpy"],
                        env_vars={"FOO": "bar baz"}, mount=MountContract(workdir="/model/demo"))
         b = s.build(spec, "", 600)
+        ran = [x for x in ran if x != "true\n"]                  # the start-up handshake
         assert b.ok and b.image_ref == "live" and b.vertices_total == len(ran) >= 4, (b, len(ran))
         m = c.created[0]; ps = m["spec"]; ct = ps["containers"][0]
-        assert ps["automountServiceAccountToken"] is False and "imagePullSecrets" not in ps and ps["activeDeadlineSeconds"] > 0
+        # the pull secret is the kubelet's (never a volume); no token, no secret mounted
+        assert ps["automountServiceAccountToken"] is False and ps["imagePullSecrets"] == [{"name": "envbuild-registry-auth"}] and ps["activeDeadlineSeconds"] > 0
         assert len(ps["containers"]) == 1 and "initContainers" not in ps
         assert all("secret" not in v for v in ps["volumes"]), ps["volumes"]
         assert ct["image"] == f"python:3.12-slim@{dg}" and ct["securityContext"]["allowPrivilegeEscalation"] is False
-        src = [v for v in ct["volumeMounts"] if v["name"] == "models"][0]
-        assert src["readOnly"] is True and src["subPath"] == "bench-x/1.0" and src["mountPath"] == "/envbuild-src"
+        # the run-time contract is mounted at its real paths, as a verification pod mounts it
+        vm = {v["mountPath"]: v for v in ct["volumeMounts"]}
+        assert vm["/model"]["name"] == "models" and vm["/model"]["readOnly"] is True and vm["/model"]["subPath"] == "bench-x/1.0", vm
+        assert vm["/inputs"]["subPath"] == "job-x/inputs" and vm["/outputs"]["subPath"] == "job-x/outputs", vm
         # a repair that adds one apt package re-runs the apt step and nothing else
         n0 = len(ran); spec.apt_packages = ["git", "g++"]
         b = s.build(spec, "", 600)
@@ -2916,13 +2921,23 @@ def _live_session():
         r = s.climb_with(spec).run("live", "/x", ["python", "demo.py", "a b"], spec.mount, 60, env={"ENVBUILD_X": "1"})
         sc = ran[-1]
         assert r.ok and "export FOO='bar baz'" in sc and "export ENVBUILD_X=1" in sc and "cd /model/demo" in sc, sc
-        assert "ln -s /envbuild-src /model" in sc and "ln -s /envbuild-io/outputs /outputs" in sc and "python demo.py 'a b'" in sc, sc
+        assert "python demo.py 'a b'" in sc and "ln -s" not in sc, sc
+        # a base with a configured SHELL (micromamba) runs build steps through it, as Kaniko does
+        _live.registry.image_shell = lambda ref: ["/usr/local/bin/_dockerfile_shell.sh"]
+        spec.base_image = "mambaorg/micromamba:1.5"
+        assert s.build(spec, "", 600).ok
+        runs = [x for x in ran if "apt-get" in x]
+        assert runs and "exec /usr/local/bin/_dockerfile_shell.sh '" in runs[-1], runs[-1][-300:]
+        _live.registry.image_shell = lambda ref: None
+        spec.base_image = "python:3.12-slim"
         # installed mode copies the source instead of linking it; the changed key starts a new pod
         spec.install_mode = "installed"
-        assert s.build(spec, "", 600).ok and len(c.created) == 2 and c.deleted == [m["metadata"]["name"]]
-        assert any("cp -a /envbuild-src/. /model/" in x for x in ran) and "ln -s /envbuild-src" not in ran[-1]
+        assert s.build(spec, "", 600).ok and len(c.created) == 3
+        assert any("cp -a /envbuild-src/. /model/" in x for x in ran)
+        vm = {v["mountPath"]: v for v in c.created[-1]["spec"]["containers"][0]["volumeMounts"]}
+        assert "/envbuild-src" in vm and "/model" not in vm, vm                 # installed: source aside, copied in
         s.cleanup("job-x")
-        assert len(c.deleted) == 2 and st["pod"] is None
+        assert len(c.deleted) == 3 and st["pod"] is None
 
 @check("classify: `cannot import name` from the repo's own package is never a pin of that package (pass 7, viva-mgen: PIN_PKG viva_mgen==0.1.0)")
 def _c_cannot_import_own():

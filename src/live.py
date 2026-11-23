@@ -38,6 +38,7 @@ from pathlib import Path
 
 import k8s
 import logs as logtools
+import registry
 from builder import BUILD_RESOURCES, BuildResult
 from envspec import EnvSpec, MountContract, render
 from errors import InfraError
@@ -45,8 +46,7 @@ from verifier import RunResult
 
 _MAIN = "live"
 _X = "/envbuild-x"          # command/result exchange, on the work claim
-_SRC = "/envbuild-src"      # the model source, read-only
-_IO = "/envbuild-io"        # inputs/ and outputs/, the same directories the verifier uses
+_SRC = "/envbuild-src"      # installed mode only: the source, read-only, to copy from
 
 # Runs each /in/N.sh in order, exactly once. `mv` makes the result appear
 # atomically: the reader never sees a half-written exit code.
@@ -73,29 +73,38 @@ class LiveSession:
 
     def __init__(self, job_id: str, client, live: dict, work_pvc: str, work_mount: str,
                  models_pvc: str, models_mount: str, code_ref: str,
-                 lifetime_s: int = 3600, resources: dict | None = None):
+                 lifetime_s: int = 3600, resources: dict | None = None,
+                 pull_secret: str = "envbuild-registry-auth"):
         self.job_id, self.client, self.live = job_id, client, live
         self.work_pvc, self.work_mount = work_pvc, Path(work_mount)
         self.models_pvc, self.models_mount = models_pvc, models_mount
         self.code_ref = code_ref
         self.lifetime_s = lifetime_s
         self.resources = resources or BUILD_RESOURCES
+        # Used by the kubelet to pull the base, never mounted into the
+        # container: the same as a verification pod. Without it the pull is
+        # anonymous and a shared cluster's NAT address hits Docker Hub's limit.
+        self.pull_secret = pull_secret
         self.attempt = 0                       # Builder protocol; unused
 
     # -- pod ---------------------------------------------------------------
     def _sub(self, leaf: str) -> str:
         return f"{self.job_id}/{leaf}"
 
-    def _pod_manifest(self, pod_name: str, image: str, gen: int) -> dict:
+    def _pod_manifest(self, pod_name: str, image: str, gen: int, spec: EnvSpec) -> dict:
         try:
             models_sub = Path(self.code_ref).relative_to(self.models_mount).as_posix()
         except ValueError as exc:
             raise InfraError(f"model source {self.code_ref} is not under the models mount "
                              f"{self.models_mount!r}") from exc
-        # in/ and out/ are made HERE, by the agent's uid: made by the container
-        # (root) they would be unwritable to an agent that is not root.
+        # in/ and out/ are made HERE, by the agent's uid, and opened to every
+        # uid: the container may be root, or the image's own user (micromamba
+        # runs as uid 57439), and a result it cannot write is a hang, not an
+        # error. Azure Files mounts 0777 anyway; other volumes do not.
         for leaf in (f"live{gen}/in", f"live{gen}/out", "inputs", "outputs"):
-            (self.work_mount / self._sub(leaf)).mkdir(parents=True, exist_ok=True)
+            d = self.work_mount / self._sub(leaf)
+            d.mkdir(parents=True, exist_ok=True)
+            d.chmod(0o777)
         return {
             "apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": pod_name, "namespace": self.client.namespace,
@@ -107,13 +116,20 @@ class LiveSession:
                 # It runs repo-controlled install code with the network on:
                 # no cluster credential, no Secret, nothing to take.
                 "automountServiceAccountToken": False,
+                "imagePullSecrets": [{"name": self.pull_secret}],
                 "containers": [{
                     "name": _MAIN, "image": image, "command": ["sh", "-c", _LOOP],
                     "volumeMounts": [
                         {"name": "work", "mountPath": _X, "subPath": self._sub(f"live{gen}")},
-                        {"name": "work", "mountPath": f"{_IO}/inputs", "subPath": self._sub("inputs")},
-                        {"name": "work", "mountPath": f"{_IO}/outputs", "subPath": self._sub("outputs")},
-                        {"name": "models", "mountPath": _SRC, "subPath": models_sub, "readOnly": True},
+                        # The run-time contract is mounted where a verification pod
+                        # mounts it -- the kubelet makes the mountpoints, so a
+                        # non-root image (micromamba) needs no write access to /.
+                        {"name": "work", "mountPath": spec.mount.input_path, "subPath": self._sub("inputs")},
+                        {"name": "work", "mountPath": spec.mount.output_path, "subPath": self._sub("outputs")},
+                        # Mounted mode: the source IS the code path. Installed mode
+                        # copies it there (the COPY step), so it sits aside.
+                        {"name": "models", "subPath": models_sub, "readOnly": True,
+                         "mountPath": _SRC if spec.install_mode == "installed" else spec.mount.code_path},
                     ],
                     "resources": self.resources,
                     # Root with default capabilities: apt-get needs them, as it
@@ -130,19 +146,29 @@ class LiveSession:
 
     def _ensure(self, spec: EnvSpec) -> None:
         """A running container for this spec's (base, install mode, code path)."""
-        key = f"{spec.base_image}@{spec.base_digest}|{spec.install_mode}|{spec.mount.code_path}"
+        m = spec.mount
+        key = (f"{spec.base_image}@{spec.base_digest}|{spec.install_mode}|"
+               f"{m.code_path}|{m.input_path}|{m.output_path}")
         if self.live.get("pod") and self.live.get("key") == key:
             return
         self.stop()
         gen = int(self.live.get("gen") or 0) + 1
         pod = k8s.object_name("envbuild-l", self.job_id, f"g{gen}")
-        self.client.create_pod(self._pod_manifest(pod, f"{spec.base_image}@{spec.base_digest}", gen))
-        self.live.update({"pod": pod, "key": key, "gen": gen, "n": 0, "done": []})
+        ref = f"{spec.base_image}@{spec.base_digest}"
+        self.client.create_pod(self._pod_manifest(pod, ref, gen, spec))
+        self.live.update({"pod": pod, "key": key, "gen": gen, "n": 0, "done": [],
+                          "shell": registry.image_shell(ref)})
         deadline = time.monotonic() + 600
         while time.monotonic() < deadline:
             phase = (self.client.get_pod(pod).get("status") or {}).get("phase")
             if phase == "Running":
-                return
+                # Handshake: a container that cannot read a command or write a
+                # result says so in seconds, not at the end of a build timeout.
+                if self._exec("true\n", 30)[0] == 0:
+                    return
+                self.stop()
+                raise InfraError(f"live pod {pod} is running but does not answer on the work claim "
+                                 f"(it cannot read {_X}/in or write {_X}/out)")
             if phase in ("Failed", "Succeeded"):
                 break
             time.sleep(2)
@@ -182,17 +208,10 @@ class LiveSession:
         return None, text, time.monotonic() - started
 
     @staticmethod
-    def _prelude(spec: EnvSpec, mount: MountContract) -> str:
-        """What the image would carry: its ENV, and the run-time mounts as links."""
-        lines = [s.instruction.replace("ENV ", "export ", 1)
-                 for s in render(spec).steps if s.kind == "env"]
-        links = [(f"{_IO}/inputs", mount.input_path), (f"{_IO}/outputs", mount.output_path)]
-        if spec.install_mode != "installed":
-            links.append((_SRC, mount.code_path))    # mounted mode: the source IS the code path
-        for target, path in links:
-            lines.append(f"[ -e {shlex.quote(path)} ] || {{ mkdir -p \"$(dirname {shlex.quote(path)})\" "
-                         f"&& ln -s {target} {shlex.quote(path)}; }}")
-        return "\n".join(lines) + "\n"
+    def _prelude(spec: EnvSpec) -> str:
+        """What the image would carry: its ENV."""
+        return "".join(s.instruction.replace("ENV ", "export ", 1) + "\n"
+                       for s in render(spec).steps if s.kind == "env")
 
     # -- Builder protocol ------------------------------------------------------
     def build(self, spec: EnvSpec, context_dir: str, timeout_s: int) -> BuildResult:
@@ -206,6 +225,9 @@ class LiveSession:
                         f"cp -a {_SRC}/. {shlex.quote(spec.mount.code_path)}/")
             elif text.startswith("RUN "):
                 body = text[len("RUN "):]
+                if self.live.get("shell"):
+                    # Docker runs `SHELL + [body]`; so does the rehearsal.
+                    body = f"exec {shlex.join(self.live['shell'])} {shlex.quote(body)}"
             else:
                 continue                        # FROM, ENV, WORKDIR, LABEL, ENTRYPOINT: not commands
             key = _step_key(text)
@@ -213,7 +235,7 @@ class LiveSession:
                 continue
             ran += 1
             left = max(30, int(timeout_s - (time.monotonic() - started)))
-            rc, log, _ = self._exec(self._prelude(spec, spec.mount) + body + "\n", left)
+            rc, log, _ = self._exec(self._prelude(spec) + body + "\n", left)
             if rc != 0:
                 out = logtools.decode(log)
                 if rc is None:
@@ -234,9 +256,11 @@ class LiveSession:
     def run(self, image_ref: str, code_ref: str, cmd: list[str], mount: MountContract,
             timeout_s: int, network: bool = False, env: dict | None = None) -> RunResult:
         spec = self._spec
-        script = self._prelude(spec, mount)
+        script = self._prelude(spec)
         script += "".join(f"export {k}={shlex.quote(str(v))}\n" for k, v in (env or {}).items())
-        script += f"mkdir -p {shlex.quote(mount.workdir)} && cd {shlex.quote(mount.workdir)} || exit 97\n"
+        # The verification pod's workingDir; a missing one is the spec's fault
+        # there too (the kubelet refuses to start), so no mkdir here.
+        script += f"cd {shlex.quote(mount.workdir)} || exit 97\n"
         # coreutils `timeout` is in every base we draft; without it the session
         # deadline in _exec still applies, at the cost of the container.
         script += (f"if command -v timeout >/dev/null; then exec timeout -k 10 {int(timeout_s)} "

@@ -193,6 +193,43 @@ def resolve_digest(image: str, timeout_s: int = 120) -> str:
     return digest
 
 
+def _platform_manifest(image: str, timeout_s: int) -> tuple[str, str, dict]:
+    """(host, repo, manifest) for linux/amd64, following an index if there is one."""
+    _, man = manifest(image, timeout_s)
+    host, repo, _ = parse_ref(image)
+    if man.get("mediaType") in _INDEX_TYPES or "manifests" in man:
+        picked = next(
+            (m for m in man.get("manifests", [])
+             if (m.get("platform") or {}).get("os") == "linux"
+             and (m.get("platform") or {}).get("architecture") == "amd64"),
+            None)
+        if picked is None:
+            raise RegistryError(f"{image}: no linux/amd64 manifest")
+        body, _hdrs = _get(host, f"/v2/{repo}/manifests/{picked['digest']}", _ACCEPT, timeout_s)
+        man = json.loads(body.decode("utf-8", "replace"))
+    return host, repo, man
+
+
+def image_shell(image: str, timeout_s: int = 60) -> list[str] | None:
+    """The image's configured SHELL (`["/usr/local/bin/_dockerfile_shell.sh"]`
+    on micromamba), or None for the default `/bin/sh -c`. A build runs RUN
+    steps through it -- that is how micromamba activates its environment --
+    so a live rehearsal (live.py) must too. None on any failure: the default
+    is right for every base without one."""
+    try:
+        host, repo, man = _platform_manifest(image, timeout_s)
+        cfg_digest = (man.get("config") or {}).get("digest")
+        if not cfg_digest:
+            return None
+        body, _hdrs = _get(host, f"/v2/{repo}/blobs/{cfg_digest}",
+                           "application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json, */*",
+                           timeout_s)
+        shell = (json.loads(body.decode("utf-8", "replace")).get("config") or {}).get("Shell")
+        return [str(s) for s in shell] if shell else None
+    except (RegistryError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
 def image_size(image: str, timeout_s: int = 120) -> int | None:
     """Total bytes the image occupies in the registry: config plus every layer.
 
@@ -206,19 +243,7 @@ def image_size(image: str, timeout_s: int = 120) -> int | None:
     otherwise succeeded.
     """
     try:
-        _, man = manifest(image, timeout_s)
-        if man.get("mediaType") in _INDEX_TYPES or "manifests" in man:
-            host, repo, _ = parse_ref(image)
-            picked = next(
-                (m for m in man.get("manifests", [])
-                 if (m.get("platform") or {}).get("os") == "linux"
-                 and (m.get("platform") or {}).get("architecture") == "amd64"),
-                None)
-            if picked is None:
-                return None
-            body, _hdrs = _get(host, f"/v2/{repo}/manifests/{picked['digest']}",
-                               _ACCEPT, timeout_s)
-            man = json.loads(body.decode("utf-8", "replace"))
+        _host, _repo, man = _platform_manifest(image, timeout_s)
         total = int((man.get("config") or {}).get("size") or 0)
         total += sum(int(layer.get("size") or 0) for layer in man.get("layers") or [])
         return total or None
