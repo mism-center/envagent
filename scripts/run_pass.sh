@@ -31,17 +31,34 @@ for n in $MODELS; do
   sed -e "s|__JOB__|$job|g" -e "s|__MODEL_ID__|bench:$n|g" \
       -e "s|__MODEL_REPO__|/models/bench-$n/1.0|g" -e "s|__ANNOTATION__||g" \
       -e "s|__MODELS_PVC__|${MODELS_PVC:-envbuild-bench-models}|g" -e "s|__AGENT_IMAGE__|$IMG|g" \
-      -e "s|__RUN_ID__|$RUN_ID|g" -e "s|__NO_MEMORY__|${NO_MEMORY:-0}|g" "$REPO/deploy/agent-job.yaml" \
-    | kubectl -n "$NS" apply -f - >> "$OUT/pass.log" 2>&1 || { echo "$(date -Is) APPLY_FAILED $n" >> "$OUT/pass.log"; exit 1; }
-  t0=$(date +%s); state=timeout
-  while [ $(( $(date +%s) - t0 )) -lt "$CAP" ]; do
+      -e "s|__RUN_ID__|$RUN_ID|g" -e "s|__NO_MEMORY__|${NO_MEMORY:-0}|g" -e "s|__CAP__|$CAP|g" \
+      "$REPO/deploy/agent-job.yaml" > "$OUT/.job.yaml"
+  # A launch that cannot reach the API is retried: a dropped network on the
+  # launching machine is not a reason to end the pass (aks-holdout-7).
+  applied=0
+  for _ in 1 2 3 4 5 6; do
+    kubectl -n "$NS" apply -f "$OUT/.job.yaml" >> "$OUT/pass.log" 2>&1 && { applied=1; break; }
+    sleep 60
+  done
+  [ $applied = 1 ] || { echo "$(date -Is) APPLY_FAILED $n" >> "$OUT/pass.log"; exit 1; }
+  # The Job's activeDeadlineSeconds enforces CAP in the cluster. This loop only
+  # watches, and only the cluster's answer ends it: an unreachable API (sleep,
+  # VPN, DNS) is waited out, never read as a timeout.
+  t0=$(date +%s); state=""
+  while [ -z "$state" ]; do
     sleep 30
-    s=$(kubectl -n "$NS" get job "envbuild-$job" -o jsonpath='{.status.succeeded}/{.status.failed}' 2>/dev/null) || continue
-    case "$s" in 1/*) state=complete; break;; */1) state=failed; break;; esac
+    s=$(kubectl -n "$NS" get job "envbuild-$job" -o jsonpath='{.status.succeeded}/{.status.failed}/{.status.conditions[?(@.type=="Failed")].reason}' 2>&1)
+    case "$s" in
+      *NotFound*) state=lost ;;               # past ttlSecondsAfterFinished while we were away
+      1/*) state=complete ;;
+      */1/DeadlineExceeded) state=timeout ;;
+      */1/*) state=failed ;;
+    esac
   done
   kubectl -n "$NS" logs "job/envbuild-$job" --tail=-1 > "$OUT/$n.log" 2>&1
-  [ "$state" = timeout ] && kubectl -n "$NS" delete job "envbuild-$job" --wait=false >> "$OUT/pass.log" 2>&1
   echo "$(date -Is) END $n $state $(( $(date +%s) - t0 ))s" >> "$OUT/pass.log"
-  echo "$job $state" > "$OUT/$n.done"
+  # `lost` means nobody saw how it ended: the verdict on the work claim is the
+  # record, and the model is NOT marked done, so a re-run picks it up.
+  [ "$state" = lost ] || echo "$job $state" > "$OUT/$n.done"
 done
 echo "$(date -Is) PASS_DONE" >> "$OUT/pass.log"

@@ -32,6 +32,11 @@ metadata:
 spec:
   backoffLimit: 0          # a retry would write a second attempt row for one job
   ttlSecondsAfterFinished: 86400
+  # The per-model cap lives HERE, enforced by the Job controller, not by a
+  # timer on whichever machine launched the pass: aks-holdout-7 lost its
+  # runner's network overnight, the laptop clock ran on, and a Job that was
+  # still running was recorded as a timeout and the pass halted.
+  activeDeadlineSeconds: __CAP__
   template:
     metadata:
       labels:
