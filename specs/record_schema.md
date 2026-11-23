@@ -137,11 +137,17 @@ Notes on the load-bearing fields:
   "charged_attempts": 2,
   "search_seconds": 412.5,
   "l3_seconds": 829.3,
+  "live_rounds": 6,
   "run": {"run_id": "…", "…": "…"}
 }
 ```
 
 `status` ∈ `verified | failed | escalated | budget_exhausted | error`.
+
+`live_rounds` counts `attempt --live` rehearsals in the job's scratch
+container. They are not attempts: no image, not charged, never a verdict, and
+their rows go to `jobs/<job>/live.jsonl`, not `attempts.jsonl`. Absent on rows
+written before rev 5.
 
 **The approval unit is the triple `(image_digest, lockfile_sha256,
 code_revision)`.** The digest names the bytes; the lockfile says what they

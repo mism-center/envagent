@@ -700,6 +700,10 @@ def resolve_first(spec: EnvSpec, requires_python: str | None, findings: list[dic
         spec = patch_mod.apply(spec, "CHANGE_INTERPRETER_VERSION", best).spec
         findings.append({"code": "interpreter_from_resolution", "entry": None, "suggestion": best,
                          "detail": f"the requirements do not resolve cleanly on Python {py}; they do on {best}"})
+    # ponytail: "no wheel" is read as "needs a compiler". False for a pure-Python
+    # sdist (c302 `bibtexparser`, viva-mgen `unum`): ~200 MB and a minute of
+    # build, never an attempt. Listing the sdist's members (.c/.pyx/CMakeLists,
+    # no build) would make it exact if image size ever matters.
     if res["needs_build"] and "build-essential" not in spec.apt_packages:
         spec.apt_packages = sorted(set(spec.apt_packages) | {"build-essential"})
         findings.append({"code": "source_build_expected", "entry": None, "suggestion": "build-essential",
@@ -1691,6 +1695,9 @@ def _write_verdict(cfg, state, status: str, reason: str) -> dict:
         # duration_s is wall clock; this is the part spent building and probing.
         "search_seconds": round(budget_elapsed(state), 2),
         "l3_seconds": round(float(state.get("l3_seconds") or 0.0), 2),
+        # `attempt --live` rehearsals (live.py): uncharged, so they are the
+        # other half of what a verdict cost.
+        "live_rounds": int(state.get("live_rounds") or 0),
         "run": run_provenance(cfg),
         # The repo-example success definition: what was run, where the command
         # came from, and every correction the builder made to the annotation's

@@ -147,6 +147,7 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
              "entrypoint_used": v.get("entrypoint_used"), "entrypoint_source": v.get("entrypoint_source"),
              "corrections": [c for c in (v.get("annotation_corrections") or []) if c.get("outcome") in ("verified", "helped")],
              "charged_attempts": v.get("charged_attempts", v.get("attempts")),
+             "duration_s": v.get("duration_s"), "live_rounds": v.get("live_rounds"),
              "infra_retries": v.get("infra_retries", 0),
              "llm_fallbacks": sum(1 for a in rows if a.get("classified_by") == "llm"),
              "step_attributed": sum(1 for a in rows if a.get("failed_rung") == "L0" and a.get("failed_step_index") is not None),
@@ -238,6 +239,10 @@ def score(attempts: list[dict], verdicts: list[dict], gt: dict, run_id: str | No
         "success_from_memory": sum(1 for t in b if t["success"] and t.get("spec_source") == "memory"),
         "success_on_alternate_example": sum(1 for t in b if t["success"] and t.get("verified_alternate")),
         "median_charged_attempts": _median([t["charged_attempts"] for t in b if t["charged_attempts"] is not None]),
+        # What a verified environment cost: image builds, wall clock, rehearsals.
+        "success_median_builds": _median([t["charged_attempts"] for t in b if t["success"] and t["charged_attempts"] is not None]),
+        "success_median_minutes": _median([round(t["duration_s"] / 60, 1) for t in b if t["success"] and t.get("duration_s")]),
+        "median_live_rounds": _median([t["live_rounds"] for t in b if t.get("live_rounds") is not None]),
         "infra_retries_total": sum(t["infra_retries"] or 0 for t in trials),
         "llm_fallback_share": (sum(t["llm_fallbacks"] for t in trials)
                                / max(1, sum(len(by_job.get(t["job_id"], [])) for t in trials))),
@@ -300,6 +305,8 @@ def main(argv=None) -> int:
     for k, v in sorted(res["attribution"].items(), key=lambda kv: -kv[1]):
         print(f"    {k:14s} {v}")
     print(f"\n  median charged attempts   {res['median_charged_attempts']}")
+    print(f"  per success: builds {res['success_median_builds']}, wall clock {res['success_median_minutes']} min"
+          + (f", live rounds {res['median_live_rounds']}" if res["median_live_rounds"] is not None else ""))
     print(f"  infra retries (uncharged) {res['infra_retries_total']}")
     print(f"  LLM-fallback share        {_pct(res['llm_fallback_share'])}")
     print(f"  failed_step_index cover.  {_pct(res['failed_step_index_coverage'])}")
