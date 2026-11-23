@@ -1,7 +1,8 @@
+
 #!/usr/bin/env bash
 # Load the benchmark sources onto the `envbuild-bench-models` claim.
 #
-#   KUBECONFIG=... scripts/load_bench_models.sh [old-claim]
+#   KUBECONFIG=... [MANIFEST=bench/fresh_manifest.yaml] scripts/load_bench_models.sh [old-claim]
 #
 # One self-expiring pod: clones every hold-out repo at its manifest sha into
 # /dst/bench-<name>/1.0, and copies from the old claim (default irods-pvc,
@@ -12,9 +13,11 @@
 set -euo pipefail
 OLD="${1:-irods-pvc}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+MANIFEST="${MANIFEST:-$REPO/bench/holdout_manifest.yaml}"
 LIST=$(python3 -c "
 import yaml
-for m in yaml.safe_load(open('$REPO/bench/holdout_manifest.yaml'))['holdout']['models']:
+d = yaml.safe_load(open('$MANIFEST'))
+for m in (d.get('holdout') or d.get('fresh'))['models']:
     print(m['id'].split(':',1)[1], m['repo'], m['sha'])")
 kubectl -n default delete pod envbuild-loader --ignore-not-found --wait=true
 kubectl -n default apply -f - <<YAML

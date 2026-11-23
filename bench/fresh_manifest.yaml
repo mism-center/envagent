@@ -1,0 +1,340 @@
+# Pre-registered fresh evaluation set (see fresh.purpose). Generated; edit only by re-running the rule.
+fresh:
+  created: '2026-11-23'
+  purpose: A pre-registered evaluation set the agent has never been tuned on. Each pass on it is reported once; nothing in
+    the agent may be changed because of one of these repos.
+  frame: GitHub repositories found by topic search (agent-based-modeling, agent-based-model, systems-biology, computational-biology
+    simulation, epidemiology simulation, computational-neuroscience simulation, mathematical-biology, epidemic-model, sbml
+    simulation, pharmacometrics, cell-simulation, population-dynamics) x language (Python, R, Julia), >=10 stars, updated
+    since 2024-01-01, not archived. 153 found.
+  mechanical_filters: 'drop repos already benchmarked, vivarium-collective, over 400 MB, and descriptions naming a list/course/tutorial/book/workshop:
+    143 left'
+  order: sha256('envbuild-fresh-2026-11-23' + full_name), ascending
+  eligibility: in order, include a repo when it is a computational model or simulation of a biological, biomedical, epidemiological
+    or ecological system, or a framework for building such simulations, meant to be run; exclude analysis-only tools, data
+    pipelines, LLM-agent frameworks, general-purpose (non-life-science) ABM/economics, file-format libraries. Stop at 20 included
+    (reached at rank 60).
+  ground_truth: bench/fresh_ground_truth.yaml, written from each README at its pinned sha by a reviewer that had not seen
+    the agent run on any of them
+  decisions:
+  - rank: 1
+    repo: conorheffron/bio-cell-red-edge
+    decision: exclude
+    why: image processing, not a simulation
+  - rank: 2
+    repo: joelnmdyer/sbi4abm
+    decision: include
+    branch: main
+    sha: e83b77df5dc7d4e65b11cfe6a8ea765b9a492416
+  - rank: 3
+    repo: uzumstanley/PHIDATA
+    decision: exclude
+    why: LLM agent framework
+  - rank: 4
+    repo: SystemsBioinformatics/cbmpy
+    decision: include
+    branch: main
+    sha: 91992c815605fd711dd06f4f98386fd7757e7f25
+  - rank: 5
+    repo: starsimhub/covasim
+    decision: exclude
+    why: already benchmarked (covasim, renamed org)
+  - rank: 6
+    repo: alberto-valdeolivas/RandomWalkRestartMH
+    decision: exclude
+    why: network analysis, not a simulation
+  - rank: 7
+    repo: bancaditalia/ABCredit.jl
+    decision: exclude
+    why: economics ABM, outside life science/health
+  - rank: 8
+    repo: sii-research/SocioVerse2
+    decision: exclude
+    why: LLM social simulation, outside life science/health
+  - rank: 9
+    repo: donnafarberlab/MMoCHi
+    decision: exclude
+    why: classifier, not a simulation
+  - rank: 10
+    repo: mesa/mesa-geo
+    decision: exclude
+    why: general-purpose ABM extension, not life-science specific
+  - rank: 11
+    repo: sepahead/NCP
+    decision: exclude
+    why: robotics coupling protocol
+  - rank: 12
+    repo: niklasf/python-agentspeak
+    decision: exclude
+    why: agent programming language interpreter
+  - rank: 13
+    repo: Met4FoF/agentMET4FOF
+    decision: exclude
+    why: metrology agent system
+  - rank: 14
+    repo: IMMIDD/GEMS
+    decision: include
+    branch: main
+    sha: f42c7ae8d3accddb1b554eb6856c9f87466e01d9
+  - rank: 15
+    repo: pablocarderam/opqua
+    decision: include
+    branch: master
+    sha: 38e8238b7191c3299e6792d3b55c8379b4de004c
+  - rank: 16
+    repo: bnediction/bonesis
+    decision: include
+    branch: master
+    sha: 65419e0239693e03531f0dfd91beec76acbfb5ce
+  - rank: 17
+    repo: YannisZa/GeNSIT
+    decision: exclude
+    why: transport spatial interaction, outside life science/health
+  - rank: 18
+    repo: maxscheurer/pycontact
+    decision: exclude
+    why: MD trajectory analysis, not a simulation
+  - rank: 19
+    repo: kausaltech/reina-model
+    decision: include
+    branch: master
+    sha: 18ce6e058b56225d42ad9362437377bc12675928
+  - rank: 20
+    repo: pasmopy/pasmopy
+    decision: include
+    branch: master
+    sha: 91d85676a72c9768f1bcbc2edd83e7306afa5d47
+  - rank: 21
+    repo: SciML/SBMLToolkit.jl
+    decision: include
+    branch: main
+    sha: 8eb1074d592d62f6938d2aa22f6a6795d36a8450
+  - rank: 22
+    repo: charwick/helipad
+    decision: exclude
+    why: general-purpose ABM framework (economics), not life-science specific
+  - rank: 23
+    repo: PEtab-dev/libpetab-python
+    decision: exclude
+    why: file-format library
+  - rank: 24
+    repo: OpenRL-Lab/ChatAgent
+    decision: exclude
+    why: LLM agent framework
+  - rank: 25
+    repo: gyorilab/indra_db
+    decision: exclude
+    why: knowledge database
+  - rank: 26
+    repo: gyorilab/pybiopax
+    decision: exclude
+    why: object model library, not a simulation
+  - rank: 27
+    repo: Andy00000000000/nonmem2mrgsolve
+    decision: exclude
+    why: model translator tool
+  - rank: 28
+    repo: siplab-gt/cleo
+    decision: include
+    branch: master
+    sha: 595fb7652f1d5c8bd32ac21c66db3f506368fc9b
+  - rank: 29
+    repo: OpenBioSim/biosimspace
+    decision: include
+    branch: devel
+    sha: f678e14298541866178f5493885b20d3fdb1703c
+  - rank: 30
+    repo: franciscozorrilla/metaGEM
+    decision: exclude
+    why: sequencing-data workflow, not a runnable model
+  - rank: 31
+    repo: VincenzoManto/Doxa
+    decision: exclude
+    why: economic/social simulation, outside life science/health
+  - rank: 32
+    repo: menicgiulia/NetMedPy
+    decision: exclude
+    why: network analysis
+  - rank: 33
+    repo: PEtab-dev/petab_select
+    decision: exclude
+    why: model-selection tooling, not a simulation
+  - rank: 34
+    repo: gioodm/wasp-proteins-annotation
+    decision: exclude
+    why: proteome annotation
+  - rank: 35
+    repo: deepkashiwa20/MepoGNN
+    decision: include
+    branch: main
+    sha: 90099d7080b93a3d0177302371cb33da45772393
+  - rank: 36
+    repo: myokit/myokit
+    decision: include
+    branch: main
+    sha: e5a4a791bcf09b1ee0f35e6036151d6dc2571478
+  - rank: 37
+    repo: comses/comses.net
+    decision: exclude
+    why: website
+  - rank: 38
+    repo: SWE-agent/SWE-agent
+    decision: exclude
+    why: LLM coding agent
+  - rank: 39
+    repo: florianhartig/BayesianTools
+    decision: exclude
+    why: statistics library
+  - rank: 40
+    repo: paulina-duda/on-growth-and-form
+    decision: include
+    branch: main
+    sha: 434b6b062e5e2d738dc921ea39a2126ce70243c1
+  - rank: 41
+    repo: ConesaLab/PaintOmics
+    decision: exclude
+    why: omics visualisation
+  - rank: 42
+    repo: ark-ecs/Ark.jl
+    decision: exclude
+    why: entity-component system, generic
+  - rank: 43
+    repo: zizroc/villager
+    decision: exclude
+    why: general-purpose ABM framework, not life-science specific
+  - rank: 44
+    repo: earmingol/scCellFie
+    decision: exclude
+    why: transcriptomics inference
+  - rank: 45
+    repo: brian-team/brian2cuda
+    decision: include
+    branch: master
+    sha: 1d7c25167a41ebb89f3b95e79e9f0e75daaabe1b
+  - rank: 46
+    repo: lobolab/mergem
+    decision: exclude
+    why: model merging tool
+  - rank: 47
+    repo: ggPMXdevelopment/ggPMX
+    decision: exclude
+    why: diagnostic plotting
+  - rank: 48
+    repo: gyorilab/indra
+    decision: exclude
+    why: literature model assembly (NLP)
+  - rank: 49
+    repo: andthum/mdtools
+    decision: exclude
+    why: MD analysis scripts
+  - rank: 50
+    repo: Furox-Art/axiomize
+    decision: exclude
+    why: generic modelling engine / LLM skill pack
+  - rank: 51
+    repo: CodeByPinar/nanoDNA-nanoROBOT-simulation
+    decision: include
+    branch: main
+    sha: 296ac0ab0c15a32d51b34f0dc944e4ee0a1f49a3
+  - rank: 52
+    repo: drug2ways/drug2ways
+    decision: exclude
+    why: network path analysis
+  - rank: 53
+    repo: SciML/MomentClosure.jl
+    decision: include
+    branch: main
+    sha: b3d05222b371d880f1f2a291f3e35f41bc791e6f
+  - rank: 54
+    repo: ShaliniAnandaPhD/Neuron
+    decision: exclude
+    why: LLM agent framework
+  - rank: 55
+    repo: TimeCopilot/timecopilot
+    decision: exclude
+    why: LLM forecasting framework
+  - rank: 56
+    repo: GOMC-WSU/py-MCMD
+    decision: include
+    branch: main
+    sha: 9bccd1ca67be31a0d976bfedde7ddc40003e9f7c
+  - rank: 57
+    repo: lixiang1076/fly-brain
+    decision: include
+    branch: main
+    sha: f6d525ab10c7a3ed4853d3d8b4b5e73f24cfe52b
+  - rank: 58
+    repo: pymanga/pyMANGA
+    decision: include
+    branch: master
+    sha: ac88fb5def47cb8e43c5d5f6138c7ac817d3a5f5
+  - rank: 59
+    repo: CMits/Flash-P
+    decision: exclude
+    why: LLM agents for causal networks
+  - rank: 60
+    repo: YisaAdeniyiAbolade/lad-seir-calibration
+    decision: include
+    branch: main
+    sha: 08a824c1e138596f10395f02199078210a2bfa20
+  models:
+  - id: bench:sbi4abm
+    repo: https://github.com/joelnmdyer/sbi4abm
+    sha: e83b77df5dc7d4e65b11cfe6a8ea765b9a492416
+  - id: bench:cbmpy
+    repo: https://github.com/SystemsBioinformatics/cbmpy
+    sha: 91992c815605fd711dd06f4f98386fd7757e7f25
+  - id: bench:gems
+    repo: https://github.com/IMMIDD/GEMS
+    sha: f42c7ae8d3accddb1b554eb6856c9f87466e01d9
+  - id: bench:opqua
+    repo: https://github.com/pablocarderam/opqua
+    sha: 38e8238b7191c3299e6792d3b55c8379b4de004c
+  - id: bench:bonesis
+    repo: https://github.com/bnediction/bonesis
+    sha: 65419e0239693e03531f0dfd91beec76acbfb5ce
+  - id: bench:reina-model
+    repo: https://github.com/kausaltech/reina-model
+    sha: 18ce6e058b56225d42ad9362437377bc12675928
+  - id: bench:pasmopy
+    repo: https://github.com/pasmopy/pasmopy
+    sha: 91d85676a72c9768f1bcbc2edd83e7306afa5d47
+  - id: bench:sbmltoolkit-jl
+    repo: https://github.com/SciML/SBMLToolkit.jl
+    sha: 8eb1074d592d62f6938d2aa22f6a6795d36a8450
+  - id: bench:cleo
+    repo: https://github.com/siplab-gt/cleo
+    sha: 595fb7652f1d5c8bd32ac21c66db3f506368fc9b
+  - id: bench:biosimspace
+    repo: https://github.com/OpenBioSim/biosimspace
+    sha: f678e14298541866178f5493885b20d3fdb1703c
+  - id: bench:mepognn
+    repo: https://github.com/deepkashiwa20/MepoGNN
+    sha: 90099d7080b93a3d0177302371cb33da45772393
+  - id: bench:myokit
+    repo: https://github.com/myokit/myokit
+    sha: e5a4a791bcf09b1ee0f35e6036151d6dc2571478
+  - id: bench:on-growth-and-form
+    repo: https://github.com/paulina-duda/on-growth-and-form
+    sha: 434b6b062e5e2d738dc921ea39a2126ce70243c1
+  - id: bench:brian2cuda
+    repo: https://github.com/brian-team/brian2cuda
+    sha: 1d7c25167a41ebb89f3b95e79e9f0e75daaabe1b
+  - id: bench:nanodna-nanorobot-simulation
+    repo: https://github.com/CodeByPinar/nanoDNA-nanoROBOT-simulation
+    sha: 296ac0ab0c15a32d51b34f0dc944e4ee0a1f49a3
+  - id: bench:momentclosure-jl
+    repo: https://github.com/SciML/MomentClosure.jl
+    sha: b3d05222b371d880f1f2a291f3e35f41bc791e6f
+  - id: bench:py-mcmd
+    repo: https://github.com/GOMC-WSU/py-MCMD
+    sha: 9bccd1ca67be31a0d976bfedde7ddc40003e9f7c
+  - id: bench:fly-brain
+    repo: https://github.com/lixiang1076/fly-brain
+    sha: f6d525ab10c7a3ed4853d3d8b4b5e73f24cfe52b
+  - id: bench:pymanga
+    repo: https://github.com/pymanga/pyMANGA
+    sha: ac88fb5def47cb8e43c5d5f6138c7ac817d3a5f5
+  - id: bench:lad-seir-calibration
+    repo: https://github.com/YisaAdeniyiAbolade/lad-seir-calibration
+    sha: 08a824c1e138596f10395f02199078210a2bfa20
