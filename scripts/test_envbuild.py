@@ -2478,6 +2478,10 @@ def _s_source_mismatch():
     assert res["buildable_trials"] == 0 and res["void_source_mismatch"], res
     res = _score.score([], [dict(v, code_revision="abc")], gt, None)
     assert res["buildable_trials"] == 1 and not res["void_source_mismatch"], res
+    # a symbolic ground-truth example (README_PY) is the harness's fixed command, not an alternate
+    gt["models"]["m"]["example"] = "README_PY"
+    res = _score.score([], [dict(v, code_revision="abc", entrypoint_used=examples.README_PY)], gt, None)
+    assert res["success_on_alternate_example"] == 0 and res["build_success"] == 1.0, res
 
 @check("draft: the interpreter default honours a requires-python floor; a native build gets a compiler; L3 runs in a writable copy (aks-rerun-7: cpm and biofilm each lost attempts to all three)")
 def _d_draft_knows_what_the_repo_says():

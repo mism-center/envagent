@@ -47,6 +47,8 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+import examples  # noqa: E402  -- the harness's fixed README/vignette commands
 _SELF_INFLICTED = re.compile(r"can't open file '/(?:outputs|model)[^']*': \[Errno 2\]|"
                              r"Read-only file system: '/model|cannot open file '/(?:outputs|model)")
 # An L3 that dies at import time is an environment failure, not the model's:
@@ -67,7 +69,16 @@ def _model(model_id: str) -> str:
 
 
 def _norm(cmd: str | None) -> str:
-    return re.sub(r"\s+", " ", (cmd or "").strip())
+    """Whitespace-normalised command. Ground truth may name an example
+    symbolically -- `README_PY` (the root README's Python blocks) or
+    `vignette:vignettes/x.Rmd` -- because the harness, not the repo, fixes the
+    command string that runs them; those expand to that string here."""
+    c = (cmd or "").strip()
+    if c == "README_PY":
+        c = examples.README_PY
+    elif c.startswith("vignette:"):
+        c = examples.vignette_command(c.split(":", 1)[1])
+    return re.sub(r"\s+", " ", c)
 
 
 def honesty(verdict: dict, attempts: list[dict]) -> list[str]:
