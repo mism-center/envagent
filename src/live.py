@@ -100,11 +100,16 @@ class LiveSession:
         # in/ and out/ are made HERE, by the agent's uid, and opened to every
         # uid: the container may be root, or the image's own user (micromamba
         # runs as uid 57439), and a result it cannot write is a hang, not an
-        # error. Azure Files mounts 0777 anyway; other volumes do not.
+        # error. Azure Files mounts 0777 already and refuses chmod (EPERM: the
+        # gate-rev5.0 canary's first live round died on it), so it is best effort;
+        # the start-up handshake catches a volume where it mattered and failed.
         for leaf in (f"live{gen}/in", f"live{gen}/out", "inputs", "outputs"):
             d = self.work_mount / self._sub(leaf)
             d.mkdir(parents=True, exist_ok=True)
-            d.chmod(0o777)
+            try:
+                d.chmod(0o777)
+            except OSError:
+                pass
         return {
             "apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": pod_name, "namespace": self.client.namespace,

@@ -2886,6 +2886,8 @@ def _live_session():
         c, st = C(), {}
         s = _live.LiveSession("job-x", c, st, "wpvc", str(work), "mpvc", str(models), str(models / "bench-x" / "1.0"))
         ran, fail = [], {"needle": None}
+        _orig_chmod = Path.chmod
+        Path.chmod = lambda self, mode: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted"))  # Azure Files
         def fake_exec(script, timeout_s):
             ran.append(script)
             bad = fail["needle"] and fail["needle"] in script
@@ -2895,6 +2897,7 @@ def _live_session():
         spec = EnvSpec(base_image="python:3.12-slim", base_digest=dg, apt_packages=["git"], pkg_specs=["numpy"],
                        env_vars={"FOO": "bar baz"}, mount=MountContract(workdir="/model/demo"))
         b = s.build(spec, "", 600)
+        Path.chmod = _orig_chmod
         ran = [x for x in ran if x != "true\n"]                  # the start-up handshake
         assert b.ok and b.image_ref == "live" and b.vertices_total == len(ran) >= 4, (b, len(ran))
         m = c.created[0]; ps = m["spec"]; ct = ps["containers"][0]
