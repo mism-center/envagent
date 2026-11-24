@@ -2976,6 +2976,15 @@ def _d_verdict_needs_clean():
     assert driver.verdict_refusal("escalated", clean_fail) is None and driver.verdict_refusal("failed", clean_fail) is None
     assert driver.verdict_refusal("error", live_fail) is None and driver.verdict_refusal("budget_exhausted", live_fail) is None
 
+@check("bench: every ground-truth and manifest file parses, and each model names buildable + example (eeeac71 shipped an unparseable ground truth)")
+def _bench_files_parse():
+    import yaml as _y
+    for f in sorted((ROOT / "bench").glob("*.yaml")):
+        d = _y.safe_load(f.read_text(encoding="utf-8"))
+        if "ground_truth" in f.name:
+            for k, v in d["models"].items():
+                assert "buildable" in v and "example" in v, (f.name, k)
+
 # ---------------------------------------------------------------- report
 if __name__ == "__main__":
     for line in PASSED:
