@@ -26,7 +26,9 @@ for m in yaml.safe_load(open('$REPO/bench/holdout_manifest.yaml'))['holdout']['m
 for n in $MODELS; do
   [ -f "$OUT/$n.done" ] && continue
   slug=$(printf '%s' "$n" | tr '[:upper:]_' '[:lower:]-' | cut -c1-24); slug=${slug%-}
-  job="$(date +%Y%m%d-%H%M%S)-$slug"
+  # The run id's hash is in the name: two passes launched in the same second
+  # (fresh-1, both arms) otherwise get one Job name and the second is refused.
+  job="$(date +%Y%m%d-%H%M%S)-$(printf '%s' "$RUN_ID" | sha256sum | cut -c1-4)-$slug"
   echo "$(date -Is) START $n envbuild-$job" >> "$OUT/pass.log"
   sed -e "s|__JOB__|$job|g" -e "s|__MODEL_ID__|bench:$n|g" \
       -e "s|__MODEL_REPO__|/models/bench-$n/1.0|g" -e "s|__ANNOTATION__||g" \
