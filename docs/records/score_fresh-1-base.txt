@@ -1,0 +1,63 @@
+run: fresh-1-base   trials: 20   buildable trials: 20
+
+  build success         15.0 %   (95% CI 5-36 %)
+  of which in scope    2/11   (cannot succeed under current policy: brian2cuda, cleo, gems, mepognn, momentclosure-jl, nanodna-nanorobot-simulation, py-mcmd, reina-model, sbmltoolkit-jl)
+  verdict correctness   15.0 %
+  false-verified       0
+  succeeded after correcting the annotation: 3
+  verified on a test suite only (not counted): 1
+  verified on a maintenance script (not counted): 0
+  verified on a usage banner only (not counted): 0
+  of the successes, started from memory:       0
+  of the successes, on an alternate shipped example: 1
+
+  failure attribution (buildable, non-success):
+    builder        12
+    annotation     3
+    unattributed   1
+    policy:alternate_example 1
+
+  median charged attempts   3.0
+  per success: builds 3, wall clock 5.7 min
+  infra retries (uncharged) 0
+  LLM-fallback share         61.5 %
+  failed_step_index cover.  100.0 %
+
+  per model:
+    biosimspace            buildable              trials=1 success=0 correct=0
+    bonesis                buildable              trials=1 success=1 correct=1
+    brian2cuda             buildable              trials=1 success=1 correct=1
+    cbmpy                  buildable              trials=1 success=0 correct=0
+    cleo                   buildable              trials=1 success=0 correct=0
+    fly-brain              buildable              trials=1 success=0 correct=0
+    gems                   buildable              trials=1 success=0 correct=0
+    lad-seir-calibration   buildable              trials=1 success=0 correct=0
+    mepognn                buildable              trials=1 success=0 correct=0
+    momentclosure-jl       buildable              trials=1 success=0 correct=0
+    myokit                 buildable              trials=1 success=0 correct=0
+    nanodna-nanorobot-simulation buildable              trials=1 success=0 correct=0
+    on-growth-and-form     buildable              trials=1 success=0 correct=0
+    opqua                  buildable              trials=1 success=0 correct=0
+    pasmopy                buildable              trials=1 success=1 correct=1
+    py-mcmd                buildable              trials=1 success=0 correct=0
+    pymanga                buildable              trials=1 success=0 correct=0
+    reina-model            buildable              trials=1 success=0 correct=0
+    sbi4abm                buildable              trials=1 success=0 correct=0
+    sbmltoolkit-jl         buildable              trials=1 success=0 correct=0
+      - sbi4abm              job-2026-11-24-ab31: failed@L0 UNKNOWN -> builder  ran=? [none]
+      - cbmpy                job-2026-11-24-cb8e: failed@L0 UNKNOWN -> builder  ran=pytest [repo_example]
+      - gems                 job-2026-11-24-f4a7: escalated@L0 UNKNOWN -> builder  ran=julia --project=docs/ docs/make.jl [repo_example]
+      - opqua                job-2026-11-24-7724: escalated@L2 RUNTIME_ERROR -> unattributed  ran=python examples/tutorials/basic_example.py [agent]
+      - reina-model          job-2026-11-24-5d4f: failed@L0 COMPILE_ERROR -> builder  ran=python -m calc.simulation [repo_example]
+      - sbmltoolkit-jl       job-2026-11-24-3390: failed@L0 UNKNOWN -> builder  ran=? [none]
+      - cleo                 job-2026-11-24-5918: failed@L1 MISSING_DEPENDENCY -> builder  ran=pytest -m 'not slow' [repo_example]
+      - biosimspace          job-2026-11-24-8b1c: failed@L0 UNKNOWN -> builder  ran=python demo/conversion.py [repo_example]
+      - mepognn              job-2026-11-24-9ff7: failed@L0 UNKNOWN -> builder  ran=python model/Main.py [repo_example]
+      - myokit               job-2026-11-24-ac7b: escalated@L2 RUNTIME_ERROR -> annotation  ran=python -m myokit icons [repo_example]
+      - on-growth-and-form   job-2026-11-24-d6b9: escalated@L0 UNKNOWN -> builder  ran=python docs/make_banner.py [repo_example]
+      - nanodna-nanorobot-simulation job-2026-11-24-7be3: failed@L2 MISSING_DATA_FILE -> annotation  ran=pytest [repo_example]
+      - momentclosure-jl     job-2026-11-24-a984: failed@L0 UNKNOWN -> builder  ran=? [none]
+      - py-mcmd              job-2026-11-24-3da0: verified@L3  -> policy:alternate_example  ran=pytest [repo_example]
+      - fly-brain            job-2026-11-24-64dd: failed@L0 UNKNOWN -> builder  ran=python fly_chat.py [repo_example]
+      - pymanga              job-2026-11-24-0b32: failed@L0 UNKNOWN -> builder  ran=pytest [repo_example]
+      - lad-seir-calibration job-2026-11-24-6b82: escalated@L3 RUNTIME_ERROR -> annotation  ran=Rscript run_analysis.R [agent]
