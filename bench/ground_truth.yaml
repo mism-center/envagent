@@ -265,7 +265,7 @@ models:
     expected_outputs: []
     human_verified: false
     source: 'README.md code block (import covasim; cv.Sim().run(); plot) -- an example under the 2026-11-13 decision,
-      missed when that decision was applied; corrected 2026-11-23
+      missed when that decision was applied; corrected 2026-11-23'
     holdout: true
     repo: https://github.com/InstituteforDiseaseModeling/covasim
     sha: fd749822fcd423e847fc542c4926674b834504be
