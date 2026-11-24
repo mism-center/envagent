@@ -2920,6 +2920,11 @@ def _live_session():
         assert not b.ok and (b.failed_step_kind, b.failed_step_field) == ("apt", "apt_packages") and "Unable to locate" in b.stderr, b
         fail["needle"] = None; n0 = len(ran)
         assert s.build(spec, "", 600).ok and len(ran) == n0 + 1
+        # a failure at the package step still reports the steps it reused before it
+        spec.pkg_specs = ["numpy", "nope-pkg"]; fail["needle"] = "nope-pkg"
+        b = s.build(spec, "", 600)
+        assert not b.ok and b.failed_step_kind == "pkg" and b.cache_hits == 2 and b.vertices_total == 1, b
+        fail["needle"] = None; spec.pkg_specs = ["numpy"]
         # ladder runs: image ENV, per-run env, mounts as links, workdir, the command
         r = s.climb_with(spec).run("live", "/x", ["python", "demo.py", "a b"], spec.mount, 60, env={"ENVBUILD_X": "1"})
         sc = ran[-1]
@@ -2957,6 +2962,19 @@ def _c_cannot_import_own():
     assert (c.failure_class, c.action) == ("ABI_MISMATCH", "PIN_PKG") and c.arg.replace("_", "-") == "process-bigraph", c
     c = classify.classify(txt, rung="L1", local_modules=["viva_mgen"])
     assert (c.failure_class, c.action) == ("ABI_MISMATCH", "PIN_PKG"), c        # L1: no code mounted, so it is a dependency
+
+@check("verdict: every close rests on a clean attempt -- never verified, failed or escalated straight from a live rehearsal")
+def _d_verdict_needs_clean():
+    clean_pass = {"job_id": "j", "last": {"ok": True, "live": False}, "best": {"image_digest": "sha256:x"}}
+    live_pass = {"job_id": "j", "last": {"ok": True, "live": True}, "best": {"image_digest": "sha256:x"}}
+    live_fail = {"job_id": "j", "last": {"ok": False, "live": True}, "best": {}}
+    clean_fail = {"job_id": "j", "last": {"ok": False, "live": False}, "best": {}}
+    assert driver.verdict_refusal("verified", clean_pass) is None
+    assert "live rehearsal" in driver.verdict_refusal("verified", live_pass)
+    assert "not a pass" in driver.verdict_refusal("verified", clean_fail)
+    assert driver.verdict_refusal("escalated", live_fail) and driver.verdict_refusal("failed", live_fail)
+    assert driver.verdict_refusal("escalated", clean_fail) is None and driver.verdict_refusal("failed", clean_fail) is None
+    assert driver.verdict_refusal("error", live_fail) is None and driver.verdict_refusal("budget_exhausted", live_fail) is None
 
 # ---------------------------------------------------------------- report
 if __name__ == "__main__":

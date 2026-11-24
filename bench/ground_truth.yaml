@@ -258,13 +258,14 @@ models:
   covasim:
     buildable: true
     language: python
-    example: null
+    example: README_PY
     example_full: null
     workdir: null
     timeout_s: 900
     expected_outputs: []
     human_verified: false
-    source: none (no README run command; annotation needed)
+    source: 'README.md code block (import covasim; cv.Sim().run(); plot) -- an example under the 2026-11-13 decision,
+      missed when that decision was applied; corrected 2026-11-23
     holdout: true
     repo: https://github.com/InstituteforDiseaseModeling/covasim
     sha: fd749822fcd423e847fc542c4926674b834504be

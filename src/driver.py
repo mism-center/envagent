@@ -1732,6 +1732,26 @@ def _write_verdict(cfg, state, status: str, reason: str) -> dict:
     return written
 
 
+def verdict_refusal(status: str, state: dict) -> str | None:
+    """Why this close must wait for a clean attempt, or None. Every verdict
+    rests on a clean build and the network-denied ladder, never on a live
+    rehearsal (live.py), which has the network on and carries every earlier
+    round's installs."""
+    last, job = state.get("last") or {}, state.get("job_id")
+    if status == "verified" and (last.get("live") or not last.get("ok")
+                                 or not (state.get("best") or {}).get("image_digest")):
+        return ("status 'verified' needs a clean attempt that passed L3: the last run was "
+                + ("a live rehearsal" if last.get("live") else "not a pass")
+                + f". Run `envbuild attempt --job-id {job}` first.")
+    if status in ("failed", "escalated") and last.get("live"):
+        # smoke-rev5.1: membrane-actin escalated from live round 7 with no image
+        # ever built, recorded L0 -- a lead, not a result.
+        return (f"status '{status}' after a live rehearsal needs a clean attempt of the current "
+                f"spec first, so the verdict rests on a real image and the network-denied ladder. "
+                f"Run `envbuild attempt --job-id {job}`, then close with what it shows.")
+    return None
+
+
 def cmd_verdict(args, cfg) -> None:
     state = load_state(cfg, args.job_id)
     already = state.get("closed")
@@ -1745,11 +1765,9 @@ def cmd_verdict(args, cfg) -> None:
             f"{last.get('failure_class')} at {last.get('failed_rung')}, which is the model's or the "
             f"spec's result. Use --status failed (the example did not pass) or escalated "
             f"(no typed repair applies).", code=3)
-    if args.status == "verified" and not already and (last.get("live") or not last.get("ok")
-                                                      or not (state.get("best") or {}).get("image_digest")):
-        die("status 'verified' needs a clean attempt that passed L3: the last run was "
-            + ("a live rehearsal" if last.get("live") else "not a pass")
-            + f". Run `envbuild attempt --job-id {state['job_id']}` first.", code=3)
+    why = None if already else verdict_refusal(args.status, state)
+    if why:
+        die(why, code=3)
     try:
         row = _write_verdict(cfg, state, args.status, args.reason or "") if not already else None
     finally:

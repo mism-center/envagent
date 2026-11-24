@@ -155,7 +155,10 @@ attempt again (charged). If `--live` is refused or unavailable, use plain
 `attempt`; nothing else changes.
 
 Do not spend the live rounds to avoid closing: when the documented example
-cannot run for a reason no typed action fixes, close with that reason.
+cannot run for a reason no typed action fixes, close with that reason — after
+one clean `attempt` of the current spec. Every verdict, `failed` and
+`escalated` included, rests on a clean attempt; the driver refuses to close
+straight from a rehearsal.
 
 Exit 0 means L3 was reached (rehearsed, with `--live`; verified, without).
 Non-zero means read the result:

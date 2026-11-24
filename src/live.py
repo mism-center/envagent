@@ -222,7 +222,7 @@ class LiveSession:
     def build(self, spec: EnvSpec, context_dir: str, timeout_s: int) -> BuildResult:
         rendered = render(spec)
         self._ensure(spec)
-        started, ran = time.monotonic(), 0
+        started, ran, reused = time.monotonic(), 0, 0
         for step in rendered.steps:
             text = step.instruction
             if step.kind == "copy":
@@ -237,6 +237,7 @@ class LiveSession:
                 continue                        # FROM, ENV, WORKDIR, LABEL, ENTRYPOINT: not commands
             key = _step_key(text)
             if key in self.live["done"]:
+                reused += 1
                 continue
             ran += 1
             left = max(30, int(timeout_s - (time.monotonic() - started)))
@@ -248,11 +249,10 @@ class LiveSession:
                 return BuildResult(ok=False, failed_step_index=step.index, failed_step_kind=step.kind,
                                    failed_step_field=step.field, stderr=out[-20000:],
                                    duration_s=time.monotonic() - started, dockerfile=rendered.text,
-                                   vertices_total=ran)
+                                   vertices_total=ran, cache_hits=reused)
             self.live["done"].append(key)
         return BuildResult(ok=True, image_ref="live", stderr="", duration_s=time.monotonic() - started,
-                           dockerfile=rendered.text, vertices_total=ran,
-                           cache_hits=len(self.live["done"]) - ran)
+                           dockerfile=rendered.text, vertices_total=ran, cache_hits=reused)
 
     # -- Verifier protocol -------------------------------------------------------
     def image_size(self, ref: str) -> int | None:
