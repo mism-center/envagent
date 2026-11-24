@@ -746,3 +746,27 @@ scorer. Changes (208 checks; none of this is in an image yet, next tag `rev4.20`
 
 Open from this run: viva-simbio's lock pins a `pbg-emitters` commit upstream has deleted; output harvesting can
 credit an attempt with an earlier attempt's files; viva-yalla's README demo calls macOS `open`.
+
+# Pass `aks-holdout-7` (rev 4.20) and rev 5 — resolve before building, search live, verify clean (2026-11-23)
+
+Pass 7: **10/19 verified (10/15 in scope), 0 false-verified** (pass 6b: 4/19). Report:
+`docs/pass_aks-holdout-7_report.md`. The hold-out is tuned-on; generalisation is measured on the pre-registered
+fresh set (`bench/fresh_manifest.yaml`, `bench/fresh_ground_truth.yaml`, 20 repos, 11 in scope).
+
+rev 5 (branch `resolve-explore`):
+
+- `src/resolve.py` — `uv pip compile --no-build` before any build: draft moves to an interpreter the requirements
+  resolve on, adds the toolchain for a wheel-less requirement, drops a name with no release; `spec`/`patch` refuse a
+  provably unresolvable change, uncharged.
+- `src/live.py`, `attempt --live` — search in one long-lived scratch container of the base image, re-running only
+  changed steps; uncharged, never a verdict. No `pods/exec` (files on the work claim), no token, no secret mounted,
+  source read-only, run-time contract mounted where a verification pod mounts it, build steps through the image's
+  SHELL (`registry.image_shell`). `verdict_refusal`: every close, positive or negative, rests on a clean attempt.
+- `classify.py` `cannot_import_name`: a missing name in the repo's own package is never a pin of it.
+- verdict field `live_rounds`; scorer reports builds, wall clock and live rounds per success; symbolic ground-truth
+  examples (`README_PY`, `vignette:`) expand to the harness's command.
+- runner: per-model cap is the Job's `activeDeadlineSeconds`; network loss waited out; run-id hash in Job names;
+  `.gitattributes` forces LF.
+
+Smoke `smoke-rev5.1`: viva-amici verified in 1 image build + 2 live rounds (was 4–5 builds), covasim in 1 build.
+
