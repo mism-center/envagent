@@ -42,9 +42,23 @@ spec:
       labels:
         app: envbuild-agent
         job-id: __JOB__
+      annotations:
+        # backoffLimit is 0, so a cluster-autoscaler scale-down that evicts this
+        # pod loses the run. The bare build/verify pods it creates already block
+        # scale-down on their own; this Job-owned one needs telling.
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
     spec:
       restartPolicy: Never
       serviceAccountName: envbuild
+      # mism-test opt-in to the autoscaled app pool, which is tainted
+      # workload=apps:NoSchedule so steady services stay off it (corepool
+      # runbook, P5). Harmless before the taint exists. If apppool110 is ever
+      # replaced, change the selector here AND in ENVBUILD_POD_SCHEDULING below,
+      # or every run sits Pending.
+      tolerations:
+        - {key: workload, operator: Equal, value: apps, effect: NoSchedule}
+      nodeSelector:
+        kubernetes.azure.com/agentpool: apppool110
       containers:
         - name: agent
           image: __AGENT_IMAGE__
@@ -54,6 +68,10 @@ spec:
           # fix something, re-run, and measure the thing you just replaced.
           imagePullPolicy: Always
           env:
+            # The same opt-in as this pod's spec above, handed to the build,
+            # verify and live pods the agent creates (src/k8s.py pod_scheduling).
+            - name: ENVBUILD_POD_SCHEDULING
+              value: '{"tolerations": [{"key": "workload", "operator": "Equal", "value": "apps", "effect": "NoSchedule"}], "nodeSelector": {"kubernetes.azure.com/agentpool": "apppool110"}}'
             - name: MODEL_ID
               value: "__MODEL_ID__"
             - name: MODEL_REPO

@@ -249,6 +249,10 @@ class Client:
         return bool((out.get("status") or {}).get("allowed"))
 
     def create_pod(self, manifest: dict) -> dict:
+        # Cluster placement rides along on every pod this client creates (build,
+        # verify, live), so they follow the agent onto the app pool. A new dict,
+        # not an in-place update: the caller's manifest stays what it built.
+        manifest = {**manifest, "spec": {**manifest["spec"], **pod_scheduling()}}
         return self.api("POST", self._pods(), manifest)
 
     def get_pod(self, name: str) -> dict:
@@ -320,3 +324,32 @@ def env_overrides() -> dict:
     driver's config table and this module cannot drift apart."""
     return {"token": os.environ.get("ENVBUILD_K8S_TOKEN") or None,
             "api_server": os.environ.get("ENVBUILD_K8S_API_SERVER") or None}
+
+
+_SCHEDULING_KEYS = {"tolerations", "nodeSelector"}
+
+
+def pod_scheduling() -> dict:
+    """Pod-spec placement fields from ENVBUILD_POD_SCHEDULING (JSON), merged into
+    every pod `Client.create_pod` sends.
+
+    mism-test taints its autoscaled app pool (`workload=apps:NoSchedule`) so only
+    app workloads land there; deploy/agent-job.yaml sets this so the build, verify
+    and live pods carry the same opt-in as the agent. Unset means `{}`: a laptop or
+    any other cluster sees no change.
+
+    Anything but a dict of the two known keys is an InfraError. A typo'd key would
+    otherwise be dropped by the API server and the pod would silently land on the
+    wrong pool -- a deployment fault, never something to record against a model.
+    """
+    raw = os.environ.get("ENVBUILD_POD_SCHEDULING", "").strip()
+    if not raw:
+        return {}
+    try:
+        extra = json.loads(raw)
+    except ValueError as exc:
+        raise InfraError(f"ENVBUILD_POD_SCHEDULING is not valid JSON: {exc}") from exc
+    if not isinstance(extra, dict) or not set(extra) <= _SCHEDULING_KEYS:
+        raise InfraError("ENVBUILD_POD_SCHEDULING must be a JSON object with only "
+                         f"{sorted(_SCHEDULING_KEYS)}; got {raw[:200]}")
+    return extra
