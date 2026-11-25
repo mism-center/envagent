@@ -790,6 +790,39 @@ def _k8s_object_name():
     assert k8s.object_name("envbuild", "j", "a1") != k8s.object_name("envbuild", "j", "a1")
 
 
+@check("k8s: ENVBUILD_POD_SCHEDULING reaches every created pod; unset changes nothing; a typo fails loudly")
+def _k8s_pod_scheduling():
+    import os   # local: resolve-explore adds a module-level one; keep the merge clean
+    # A real Client with api() stubbed: create_pod is where the merge happens, so
+    # the FakeClient the builder/verifier checks use would test nothing here.
+    c = k8s.Client("https://x", "default")
+    c.api = lambda method, path, body=None, **_: body
+    pod = {"kind": "Pod", "spec": {"restartPolicy": "Never"}}
+    tol = [{"key": "workload", "operator": "Equal", "value": "apps", "effect": "NoSchedule"}]
+    sel = {"kubernetes.azure.com/agentpool": "apppool110"}
+    saved = os.environ.pop("ENVBUILD_POD_SCHEDULING", None)
+    try:
+        # Unset: the manifest goes out exactly as built (laptops, other clusters).
+        assert c.create_pod(pod)["spec"] == {"restartPolicy": "Never"}
+        os.environ["ENVBUILD_POD_SCHEDULING"] = json.dumps({"tolerations": tol, "nodeSelector": sel})
+        sent = c.create_pod(pod)["spec"]
+        assert sent == {"restartPolicy": "Never", "tolerations": tol, "nodeSelector": sel}, sent
+        assert pod["spec"] == {"restartPolicy": "Never"}, "caller's manifest was mutated"
+        # A typo'd key would be dropped by the API server and the pod would land
+        # on the wrong pool without a word. It must stop the run instead.
+        for bad in ('{"nodeselector": {}}', "not json", "[]"):
+            os.environ["ENVBUILD_POD_SCHEDULING"] = bad
+            try:
+                c.create_pod(pod)
+                raise AssertionError(f"{bad!r} did not raise")
+            except InfraError:
+                pass
+    finally:
+        os.environ.pop("ENVBUILD_POD_SCHEDULING", None)
+        if saved is not None:
+            os.environ["ENVBUILD_POD_SCHEDULING"] = saved
+
+
 @check("builder: pod name is a valid, unique k8s object name")
 def _k8s_pod_name():
     b = mk_builder(job_id="job-2026-09-14-a10a")
